@@ -27,6 +27,7 @@ import OidcTools from './components/OidcTools';
 import XswSimulator from './components/XswSimulator';
 import DeviceFlowVisualizer from './components/DeviceFlowVisualizer';
 import LogoutExplorer from './components/LogoutExplorer';
+import TokenTester from './components/TokenTester';
 import { usePersistentState } from './hooks/usePersistentState';
 import type { DecoderData } from './types';
 
@@ -109,6 +110,8 @@ const App: React.FC = () => {
         return <DeviceFlowVisualizer />;
       case AppView.LOGOUT_EXPLORER:
         return <LogoutExplorer />;
+      case AppView.TOKEN_TESTER:
+        return <TokenTester />;
       default:
         return (
           <JwtDecoder

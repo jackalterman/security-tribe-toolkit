@@ -1,6 +1,6 @@
 const DB_NAME = 'SecurityTribeToolkitDB';
 const STORE_NAME = 'token-diff';
-const DB_VERSION = 2; // Increment version to add new store
+const DB_VERSION = 4;
 
 export interface TokenDiffState {
   tokenA: string;
@@ -31,6 +31,21 @@ export const openDB = (): Promise<IDBDatabase> => {
       // Also ensure har-file store exists (for backward compatibility)
       if (!db.objectStoreNames.contains('har-file')) {
         db.createObjectStore('har-file');
+      }
+
+      // Create token-tester store if it doesn't exist
+      if (!db.objectStoreNames.contains('token-tester')) {
+        db.createObjectStore('token-tester');
+      }
+      
+      // Create jwt-encoder store if it doesn't exist
+      if (!db.objectStoreNames.contains('jwt-encoder')) {
+        db.createObjectStore('jwt-encoder');
+      }
+      
+      // Create jwt-decoder store if it doesn't exist
+      if (!db.objectStoreNames.contains('jwt-decoder')) {
+        db.createObjectStore('jwt-decoder');
       }
     };
   });

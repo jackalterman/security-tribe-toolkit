@@ -3,8 +3,8 @@ import React, { useState, useEffect } from 'react';
 import CodeBlock from './CodeBlock';
 import { jwtService } from '../services/jwtService';
 import { storageService } from '../services/storageService';
-import { usePersistentState } from '../hooks/usePersistentState';
-import { SendIcon, KeyIcon, SaveIcon, TrashIcon, RefreshIcon } from './icons';
+import { getJwtEncoderState, saveJwtEncoderState, JwtEncoderState } from '../services/jwtStorage';
+import { SendIcon, KeyIcon, SaveIcon, RefreshIcon } from './icons';
 import type { DecoderData } from '../types';
 
 interface JwtEncoderProps {
@@ -20,25 +20,57 @@ const defaultPayload = {
 };
 
 const JwtEncoder: React.FC<JwtEncoderProps> = ({ onSendToDecoder }) => {
-  const [alg, setAlg] = usePersistentState('jwt-encoder-alg', 'HS256');
-  const [header, setHeader] = usePersistentState('jwt-encoder-header', JSON.stringify({ alg: 'HS256', typ: 'JWT' }, null, 2));
-  const [payload, setPayload] = usePersistentState('jwt-encoder-payload', JSON.stringify(defaultPayload, null, 2));
-  const [secret, setSecret] = usePersistentState('jwt-encoder-secret', 'your-256-bit-secret');
-  const [privateKey, setPrivateKey] = usePersistentState('jwt-encoder-private-key', '');
+  const [alg, setAlg] = useState('HS256');
+  const [header, setHeader] = useState(JSON.stringify({ alg: 'HS256', typ: 'JWT' }, null, 2));
+  const [payload, setPayload] = useState(JSON.stringify(defaultPayload, null, 2));
+  const [secret, setSecret] = useState('your-256-bit-secret');
+  const [privateKey, setPrivateKey] = useState('');
   const [publicKey, setPublicKey] = useState('');
   const [generatedToken, setGeneratedToken] = useState('');
   const [error, setError] = useState('');
   const [showSecret, setShowSecret] = useState(false);
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  // Load state from IndexedDB
+  useEffect(() => {
+    const loadState = async () => {
+      try {
+        const savedState = await getJwtEncoderState();
+        if (savedState) {
+          setAlg(savedState.alg);
+          setHeader(savedState.header);
+          setPayload(savedState.payload);
+          setSecret(savedState.secret);
+          setPrivateKey(savedState.privateKey);
+        }
+      } catch (err) {
+        console.error('Failed to load encoder state', err);
+      } finally {
+        setIsLoaded(true);
+      }
+    };
+    loadState();
+  }, []);
+
+  // Save state to IndexedDB
+  useEffect(() => {
+    if (!isLoaded) return;
+    const state: JwtEncoderState = { alg, header, payload, secret, privateKey };
+    saveJwtEncoderState(state).catch(err => console.error('Failed to save encoder state', err));
+  }, [isLoaded, alg, header, payload, secret, privateKey]);
 
   useEffect(() => {
+    if (!isLoaded) return;
     try {
       const headerObj = JSON.parse(header);
-      headerObj.alg = alg;
-      setHeader(JSON.stringify(headerObj, null, 2));
+      if (headerObj.alg !== alg) {
+        headerObj.alg = alg;
+        setHeader(JSON.stringify(headerObj, null, 2));
+      }
     } catch (e) {
       // Ignore parsing errors while typing
     }
-  }, [alg]);
+  }, [alg, isLoaded]);
 
   const handleGenerateKeys = async () => {
     let keys;
@@ -64,6 +96,7 @@ const JwtEncoder: React.FC<JwtEncoderProps> = ({ onSendToDecoder }) => {
       }
       const token = await jwtService.sign(headerObj, payloadObj, key);
       setGeneratedToken(token);
+      localStorage.setItem('SecurityTribeToolkit_encoded_jwt', token);
     } catch (e: any) {
       setError(`Failed to generate token: ${e.message}`);
       console.error(e);

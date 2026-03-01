@@ -50,7 +50,8 @@ export enum AppView {
   OIDC_ASSERTION = 'Assertion Generator',
   XSW_SIMULATOR = 'XSW Simulator',
   DEVICE_FLOW = 'Device Flow',
-  LOGOUT_EXPLORER = 'Logout Explorer'
+  LOGOUT_EXPLORER = 'Logout Explorer',
+  TOKEN_TESTER = 'Token Tester'
 }
 
 interface SidebarProps {
@@ -83,6 +84,7 @@ const categories: Category[] = [
       { id: AppView.ENCODE, label: 'JWT Encoder', icon: FileCodeIcon },
       { id: AppView.DIFF, label: 'Token Diff', icon: ScaleIcon },
       { id: AppView.PKCE, label: 'PKCE Generator', icon: RefreshIcon },
+      { id: AppView.TOKEN_TESTER, label: 'Token Tester', icon: ServerIcon },
     ],
   },
   {

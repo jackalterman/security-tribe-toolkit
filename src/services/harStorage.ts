@@ -3,7 +3,7 @@ import { HarRoot } from './har';
 const DB_NAME = 'SecurityTribeToolkitDB';
 const STORE_NAME = 'har-file';
 const METADATA_KEY = 'har-metadata';
-const DB_VERSION = 2;
+const DB_VERSION = 4;
 
 export const openDB = (): Promise<IDBDatabase> => {
   return new Promise((resolve, reject) => {
@@ -29,6 +29,21 @@ export const openDB = (): Promise<IDBDatabase> => {
       // Create token-diff store if it doesn't exist (for compatibility)
       if (!db.objectStoreNames.contains('token-diff')) {
         db.createObjectStore('token-diff');
+      }
+
+      // Create token-tester store if it doesn't exist
+      if (!db.objectStoreNames.contains('token-tester')) {
+        db.createObjectStore('token-tester');
+      }
+      
+      // Create jwt-encoder store if it doesn't exist
+      if (!db.objectStoreNames.contains('jwt-encoder')) {
+        db.createObjectStore('jwt-encoder');
+      }
+      
+      // Create jwt-decoder store if it doesn't exist
+      if (!db.objectStoreNames.contains('jwt-decoder')) {
+        db.createObjectStore('jwt-decoder');
       }
     };
   });

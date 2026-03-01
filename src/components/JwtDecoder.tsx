@@ -3,9 +3,9 @@ import CodeBlock from './CodeBlock';
 import JsonViewer from './JsonViewer';
 import { jwtService } from '../services/jwtService';
 import { storageService } from '../services/storageService';
-import { usePersistentState } from '../hooks/usePersistentState';
+import { getJwtDecoderState, saveJwtDecoderState, JwtDecoderState } from '../services/jwtStorage';
 import { DecodedJwt, VerificationResult, DecoderData } from '../types';
-import { CheckIcon, AlertTriangleIcon, SaveIcon, TrashIcon, RefreshIcon } from './icons';
+import { CheckIcon, AlertTriangleIcon, SaveIcon, RefreshIcon } from './icons';
 
 interface JwtDecoderProps {
   initialData: DecoderData | null;
@@ -13,23 +13,51 @@ interface JwtDecoderProps {
 }
 
 const JwtDecoder: React.FC<JwtDecoderProps> = ({ initialData, onDataHandled }) => {
-  const [token, setToken] = usePersistentState('jwt-decoder-token', '');
-  const [key, setKey] = usePersistentState('jwt-decoder-key', 'your-256-bit-secret');
-  const [audience, setAudience] = usePersistentState('jwt-decoder-audience', '');
-  const [issuer, setIssuer] = usePersistentState('jwt-decoder-issuer', '');
+  const [token, setToken] = useState('');
+  const [key, setKey] = useState('your-256-bit-secret');
+  const [audience, setAudience] = useState('');
+  const [issuer, setIssuer] = useState('');
   const [decoded, setDecoded] = useState<DecodedJwt | null>(null);
   const [verification, setVerification] = useState<VerificationResult | null>(null);
   const [showSecret, setShowSecret] = useState(false);
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  // Load state from IndexedDB
+  useEffect(() => {
+    const loadState = async () => {
+      try {
+        const savedState = await getJwtDecoderState();
+        if (savedState) {
+          setToken(savedState.token);
+          setKey(savedState.key);
+          setAudience(savedState.audience);
+          setIssuer(savedState.issuer);
+        }
+      } catch (err) {
+        console.error('Failed to load decoder state', err);
+      } finally {
+        setIsLoaded(true);
+      }
+    };
+    loadState();
+  }, []);
+
+  // Save state to IndexedDB
+  useEffect(() => {
+    if (!isLoaded) return;
+    const state: JwtDecoderState = { token, key, audience, issuer };
+    saveJwtDecoderState(state).catch(err => console.error('Failed to save decoder state', err));
+  }, [isLoaded, token, key, audience, issuer]);
 
   useEffect(() => {
-    if (initialData) {
+    if (initialData && isLoaded) {
       setToken(initialData.token || '');
       setKey(initialData.key || 'your-256-bit-secret');
       setAudience(initialData.audience || '');
       setIssuer(initialData.issuer || '');
       onDataHandled();
     }
-  }, [initialData, onDataHandled]);
+  }, [initialData, onDataHandled, isLoaded]);
 
   useEffect(() => {
     const decodedToken = jwtService.decode(token);
