@@ -12,19 +12,16 @@ interface KeyManagerProps {
 
 const KeyManager: React.FC<KeyManagerProps> = ({ onSendToDecoder }) => {
   const [keyPair, setKeyPair] = useState<KeyPair | null>(null);
-  const [activeTab, setActiveTab] = useState<'pem' | 'jwks' | 'cert' | 'registration'>('pem');
+  const [activeTab, setActiveTab] = useState<'pem' | 'jwks' | 'cert'>('pem');
   const [showPrivate, setShowPrivate] = useState(false);
   const [algType, setAlgType] = useState<'RSA' | 'EC'>('RSA');
   const [keySize, setKeySize] = useState<number>(2048);
-  const [clientId, setClientId] = useState('');
-  const [clientSecret, setClientSecret] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [exportSource, setExportSource] = useState<'pem' | 'jwks' | 'cert'>('pem');
 
   useEffect(() => {
     generateKeys();
-    generateCredentials();
   }, []);
 
   const generateKeys = async () => {
@@ -43,27 +40,6 @@ const KeyManager: React.FC<KeyManagerProps> = ({ onSendToDecoder }) => {
     } finally {
         setIsGenerating(false);
     }
-  };
-
-  const generateCredentials = () => {
-      setClientId(crypto.randomUUID());
-      const array = new Uint8Array(32);
-      crypto.getRandomValues(array);
-      setClientSecret(Array.from(array, byte => byte.toString(16).padStart(2, '0')).join(''));
-  };
-
-  const getSimulatedCert = () => {
-      if (!keyPair) return '';
-      const body = keyPair.publicKey
-        .replace('-----BEGIN PUBLIC KEY-----', '')
-        .replace('-----END PUBLIC KEY-----', '')
-        .trim();
-      
-      return `-----BEGIN CERTIFICATE-----
-MIIDXTCCAkWgAwIBAgIJAL... (Simulated Header) ...
-${body}
-... (Simulated Footer & Signature) ...
------END CERTIFICATE-----`;
   };
 
   const handleCopy = (text: string) => {
@@ -213,15 +189,6 @@ ${body}
                     </>
                 )}
             </button>
-            
-            <div className="border-t border-slate-100 pt-4">
-                <button
-                    onClick={generateCredentials}
-                    className="w-full py-2.5 px-4 border border-slate-300 shadow-sm text-sm font-medium rounded-lg text-slate-700 bg-white hover:bg-slate-50 transition-colors"
-                >
-                    Regenerate App Secrets
-                </button>
-            </div>
         </div>
 
         <div className="bg-indigo-50 p-5 rounded-xl border border-indigo-100 text-sm text-indigo-900">
@@ -244,7 +211,6 @@ ${body}
                 <button onClick={() => setActiveTab('pem')} className={`flex-1 py-3 px-4 whitespace-nowrap text-sm font-bold border-b-2 transition-colors ${activeTab === 'pem' ? 'border-sky-600 text-sky-600 bg-slate-50' : 'border-transparent text-slate-500 hover:text-slate-700 hover:bg-slate-50'}`}>PEM Keys</button>
                 <button onClick={() => setActiveTab('jwks')} className={`flex-1 py-3 px-4 whitespace-nowrap text-sm font-bold border-b-2 transition-colors ${activeTab === 'jwks' ? 'border-sky-600 text-sky-600 bg-slate-50' : 'border-transparent text-slate-500 hover:text-slate-700 hover:bg-slate-50'}`}>JWKS</button>
                 <button onClick={() => setActiveTab('cert')} className={`flex-1 py-3 px-4 whitespace-nowrap text-sm font-bold border-b-2 transition-colors ${activeTab === 'cert' ? 'border-sky-600 text-sky-600 bg-slate-50' : 'border-transparent text-slate-500 hover:text-slate-700 hover:bg-slate-50'}`}>Certificate</button>
-                <button onClick={() => setActiveTab('registration')} className={`flex-1 py-3 px-4 whitespace-nowrap text-sm font-bold border-b-2 transition-colors ${activeTab === 'registration' ? 'border-sky-600 text-sky-600 bg-slate-50' : 'border-transparent text-slate-500 hover:text-slate-700 hover:bg-slate-50'}`}>App Credentials</button>
             </div>
             
             <div className="p-6 flex-1 bg-slate-50 overflow-y-auto">
@@ -352,49 +318,6 @@ ${body}
                             </p>
                         </div>
                         <CertificateAnalyzer onSendToDecoder={onSendToDecoder} />
-                    </div>
-                )}
-
-                {activeTab === 'registration' && (
-                    <div className="space-y-6 animate-fade-in">
-                        <div className="bg-white p-8 rounded-xl border border-slate-200 shadow-sm">
-                            <h4 className="text-lg font-bold text-slate-800 mb-6 border-b pb-2">Application Credentials</h4>
-                             <div className="space-y-6">
-                                <div>
-                                    <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Client ID</label>
-                                    <div className="flex">
-                                        <input readOnly value={clientId} className="flex-1 rounded-l-lg border-slate-300 bg-slate-50 text-sm font-mono text-slate-600 focus:ring-0" />
-                                        <button 
-                                            onClick={() => handleCopy(clientId)}
-                                            className="px-4 bg-slate-100 border border-l-0 border-slate-300 rounded-r-lg text-slate-600 hover:bg-slate-200 transition-colors"
-                                        >
-                                            <ClipboardIcon className="h-5 w-5" />
-                                        </button>
-                                    </div>
-                                </div>
-                                <div>
-                                    <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Client Secret</label>
-                                    <div className="flex group relative">
-                                        <input readOnly type="password" value={clientSecret} className="flex-1 rounded-l-lg border-slate-300 bg-slate-50 text-sm font-mono text-slate-600 group-hover:text-slate-900 focus:ring-0" />
-                                        <button 
-                                            onClick={() => handleCopy(clientSecret)}
-                                            className="px-4 bg-slate-100 border border-l-0 border-slate-300 rounded-r-lg text-slate-600 hover:bg-slate-200 transition-colors"
-                                        >
-                                            <ClipboardIcon className="h-5 w-5" />
-                                        </button>
-                                    </div>
-                                    <div className="mt-4 flex items-start gap-3 text-red-700 bg-red-50 p-4 rounded-lg border border-red-100">
-                                        <AlertTriangleIcon className="h-5 w-5 mt-0.5 flex-shrink-0 text-red-500" />
-                                        <div>
-                                            <p className="text-sm font-bold">Security Warning</p>
-                                            <p className="text-xs mt-1 opacity-90">
-                                                This secret grants full access to your application. Never expose it in client-side code, GitHub, or unencrypted logs.
-                                            </p>
-                                        </div>
-                                    </div>
-                                </div>
-                             </div>
-                        </div>
                     </div>
                 )}
             </div>
