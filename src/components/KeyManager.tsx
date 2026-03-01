@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import CodeBlock from './CodeBlock';
 import { jwtService } from '../services/jwtService';
-import { KeyIcon, CertificateIcon, ClipboardIcon, CheckIcon, ShieldCheckIcon, AlertTriangleIcon, RefreshIcon } from './icons';
+import { KeyIcon, CertificateIcon, ClipboardIcon, CheckIcon, ShieldCheckIcon, AlertTriangleIcon, RefreshIcon, DownloadIcon } from './icons';
 import { KeyPair, DecoderData } from '../types';
 import CertificateAnalyzer from './CertificateAnalyzer';
+import ExportModal from './ExportModal';
 
 interface KeyManagerProps {
   onSendToDecoder?: (data: DecoderData) => void;
@@ -18,6 +19,8 @@ const KeyManager: React.FC<KeyManagerProps> = ({ onSendToDecoder }) => {
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [exportSource, setExportSource] = useState<'pem' | 'jwks' | 'cert'>('pem');
 
   useEffect(() => {
     generateKeys();
@@ -94,6 +97,56 @@ ${body}
           </button>
       );
   }
+
+  const ExportButton = ({ onClick, disabled }: { onClick: () => void, disabled?: boolean }) => {
+    return (
+        <button 
+          onClick={onClick}
+          disabled={disabled}
+          className={`flex items-center space-x-1 px-3 py-1 rounded-md text-xs font-medium transition-all border ${
+              disabled 
+              ? 'bg-slate-50 border-slate-200 text-slate-300 cursor-not-allowed' 
+              : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50 hover:border-slate-300'
+          }`}
+          title="Export to file"
+        >
+          <DownloadIcon className="w-3 h-3" />
+          <span>Export</span>
+        </button>
+    );
+  }
+
+  const handleExportClick = (source: 'pem' | 'jwks' | 'cert') => {
+      setExportSource(source);
+      setIsExportModalOpen(true);
+  };
+
+  const handleExportConfirm = (format: 'p12' | 'jwks' | 'pem', options: { password?: string; alias?: string }) => {
+      if (!keyPair) return;
+
+      try {
+          if (format === 'pem') {
+              const content = exportSource === 'jwks' 
+                  ? JSON.stringify(keyPair.jwks, null, 2) 
+                  : (exportSource === 'pem' ? (showPrivate ? keyPair.privateKey : keyPair.publicKey) : '');
+              
+              const filename = exportSource === 'jwks' ? 'keys.jwks.json' : (showPrivate ? 'private-key.pem' : 'public-key.pem');
+              jwtService.downloadFile(content, filename, exportSource === 'jwks' ? 'application/json' : 'application/x-pem-file');
+          } else if (format === 'jwks') {
+              jwtService.downloadFile(JSON.stringify(keyPair.jwks, null, 2), 'keys.jwks.json', 'application/json');
+          } else if (format === 'p12') {
+              const p12 = jwtService.exportToPkcs12(
+                  keyPair.privateKey, 
+                  null, // No certificate for now, it will self-sign
+                  options.password || '', 
+                  options.alias || 'my-key'
+              );
+              jwtService.downloadFile(p12, `${options.alias || 'key'}.p12`, 'application/x-pkcs12');
+          }
+      } catch (e: any) {
+          alert(`Export failed: ${e.message}`);
+      }
+  };
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 animate-fade-in">
@@ -210,7 +263,10 @@ ${body}
                                         <p className="text-xs text-slate-500">Shareable • {algType}</p>
                                     </div>
                                 </div>
-                                <CopyButton text={keyPair.publicKey} />
+                                <div className="flex items-center gap-2">
+                                    <ExportButton onClick={() => handleExportClick('pem')} />
+                                    <CopyButton text={keyPair.publicKey} />
+                                </div>
                             </div>
                             <div className="p-4 bg-slate-900">
                                 <CodeBlock content={keyPair.publicKey} />
@@ -230,6 +286,7 @@ ${body}
                                     </div>
                                 </div>
                                 <div className="flex items-center space-x-3">
+                                    <ExportButton onClick={() => handleExportClick('pem')} disabled={!showPrivate} />
                                     <button 
                                         onClick={() => setShowPrivate(!showPrivate)}
                                         className="text-xs font-semibold text-slate-600 hover:text-sky-600 focus:outline-none"
@@ -275,7 +332,10 @@ ${body}
                                     <h4 className="text-sm font-bold text-slate-800">JSON Web Key Set (JWKS)</h4>
                                     <p className="text-xs text-slate-500 mt-1">Standard format for exposing public keys (RFC 7517).</p>
                                 </div>
-                                <CopyButton text={JSON.stringify(keyPair.jwks, null, 2)} />
+                                <div className="flex items-center gap-2">
+                                    <ExportButton onClick={() => handleExportClick('jwks')} />
+                                    <CopyButton text={JSON.stringify(keyPair.jwks, null, 2)} />
+                                </div>
                             </div>
                             <div className="bg-slate-900 rounded-lg overflow-hidden">
                                 <CodeBlock content={JSON.stringify(keyPair.jwks, null, 2)} language="json" />
@@ -340,6 +400,19 @@ ${body}
             </div>
         </div>
       </div>
+
+      {keyPair && (
+        <ExportModal 
+            isOpen={isExportModalOpen}
+            onClose={() => setIsExportModalOpen(false)}
+            onExport={handleExportConfirm}
+            title={exportSource === 'jwks' ? 'Export JWKS' : 'Export Key Pair'}
+            allowP12={exportSource === 'pem'} // Only allow P12 if we have the PEM key source
+            allowJwks={exportSource === 'jwks'}
+            allowPem={true}
+            defaultAlias={algType === 'RSA' ? 'rsa-key' : 'ec-key'}
+        />
+      )}
     </div>
   );
 };

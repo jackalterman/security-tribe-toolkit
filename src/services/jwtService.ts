@@ -1,4 +1,5 @@
 import type { DecodedJwt, JwtHeader, JwtPayload, VerificationResult, KeyPair } from '../types';
+import forge from 'node-forge';
 
 function base64UrlEncode(data: string | Uint8Array): string {
   let inputBytes: Uint8Array;
@@ -318,5 +319,67 @@ export const jwtService = {
     } catch (e: any) {
       return { isValid: false, reason: `Signature verification failed: ${e.message}` };
     }
+  },
+
+  /**
+   * Exports keys/certificates to a PKCS#12 (.p12) binary format.
+   */
+  exportToPkcs12(privateKeyPem: string, certificatePem: string | null, password: string, alias: string): Uint8Array {
+    try {
+      const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
+      
+      let cert;
+      if (certificatePem) {
+        cert = forge.pki.certificateFromPem(certificatePem);
+      } else {
+        // Generate a minimal self-signed certificate if none provided
+        // This is often required for P12 files to be valid in many tools
+        cert = forge.pki.createCertificate();
+        cert.publicKey = forge.pki.setRsaPublicKey(privateKey.n, privateKey.e);
+        cert.serialNumber = '01';
+        cert.validity.notBefore = new Date();
+        cert.validity.notAfter = new Date();
+        cert.validity.notAfter.setFullYear(cert.validity.notBefore.getFullYear() + 1);
+        
+        const attrs = [{
+          name: 'commonName',
+          value: alias
+        }];
+        cert.setSubject(attrs);
+        cert.setIssuer(attrs);
+        cert.sign(privateKey);
+      }
+
+      const p12Asn1 = forge.pkcs12.toPkcs12Asn1(privateKey, [cert], password, {
+        generateLocalKeyId: true,
+        friendlyName: alias,
+        algorithm: 'aes128'
+      });
+
+      const p12Der = forge.asn1.toDer(p12Asn1).getBytes();
+      const p12Uint8 = new Uint8Array(p12Der.length);
+      for (let i = 0; i < p12Der.length; i++) {
+        p12Uint8[i] = p12Der.charCodeAt(i);
+      }
+      return p12Uint8;
+    } catch (e: any) {
+      console.error('PKCS#12 Export Error:', e);
+      throw new Error(`Failed to generate PKCS#12: ${e.message}`);
+    }
+  },
+
+  /**
+   * Triggers a browser download for binary or text content.
+   */
+  downloadFile(content: string | Uint8Array, filename: string, contentType: string) {
+    const blob = new Blob([content as any], { type: contentType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
 };

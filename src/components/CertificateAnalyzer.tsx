@@ -11,9 +11,12 @@ import {
   ArrowRightIcon,
   RefreshIcon,
   CertificateIcon,
-  ExternalLinkIcon
+  ExternalLinkIcon,
+  ClipboardIcon
 } from './icons';
 import type { DecoderData } from '../types';
+import ExportModal from './ExportModal';
+import { jwtService } from '../services/jwtService';
 
 interface CertificateAnalyzerProps {
   // onSendToDecoder removed as JWT decoder is not for public keys
@@ -26,6 +29,7 @@ const CertificateAnalyzer: React.FC<CertificateAnalyzerProps> = () => {
   const [error, setError] = useState<string | null>(null);
   const [manualPem, setManualPem] = useState('');
   const [selectedCertIndex, setSelectedCertIndex] = useState(0);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
 
   const handleFetch = async () => {
     if (!url) return;
@@ -55,9 +59,27 @@ const CertificateAnalyzer: React.FC<CertificateAnalyzerProps> = () => {
   };
 
   const handleExport = () => {
+    setIsExportModalOpen(true);
+  };
+
+  const handleExportConfirm = (format: 'p12' | 'jwks' | 'pem', options: { password?: string; alias?: string }) => {
     if (chain.length === 0) return;
     const cert = chain[selectedCertIndex];
-    certificateService.exportCertificate(cert.pem, `certificate-${selectedCertIndex}.pem`);
+    
+    try {
+      if (format === 'pem') {
+        certificateService.exportCertificate(cert.pem, `certificate-${selectedCertIndex}.pem`);
+      } else if (format === 'p12') {
+        // We don't have a private key here, but we can't really make a p12 without one in node-forge easily 
+        // unless we use a dummy one or if the library allows it.
+        // For now, if we don't have a private key, we'll inform the user or just export PEM.
+        // Actually, let's just use the certificateService.exportCertificate for PEM as a fallback
+        // or just allow PEM in this context.
+        alert('PKCS#12 export requires a matching private key. Use the PEM Keys tab for private key export.');
+      }
+    } catch (e: any) {
+      alert(`Export failed: ${e.message}`);
+    }
   };
 
   const selectedCert = chain[selectedCertIndex];
@@ -199,9 +221,19 @@ const CertificateAnalyzer: React.FC<CertificateAnalyzerProps> = () => {
               </div>
               <div className="flex gap-2">
                 <button 
+                  onClick={() => {
+                    navigator.clipboard.writeText(selectedCert?.pem || '');
+                    alert('PEM copied to clipboard');
+                  }}
+                  className="p-1.5 text-slate-400 hover:text-sky-600 hover:bg-sky-50 rounded-lg transition-colors"
+                  title="Copy PEM"
+                >
+                  <ClipboardIcon className="h-4 w-4" />
+                </button>
+                <button 
                   onClick={handleExport}
                   className="p-1.5 text-slate-400 hover:text-sky-600 hover:bg-sky-50 rounded-lg transition-colors"
-                  title="Export PEM"
+                  title="Export to file"
                 >
                   <DownloadIcon className="h-4 w-4" />
                 </button>
@@ -270,6 +302,19 @@ const CertificateAnalyzer: React.FC<CertificateAnalyzerProps> = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {selectedCert && (
+        <ExportModal 
+          isOpen={isExportModalOpen}
+          onClose={() => setIsExportModalOpen(false)}
+          onExport={handleExportConfirm}
+          title="Export Certificate"
+          allowP12={false} // Disable P12 if no private key
+          allowJwks={false}
+          allowPem={true}
+          defaultAlias="certificate"
+        />
       )}
     </div>
   );
