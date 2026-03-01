@@ -29,6 +29,11 @@ const TokenTester: React.FC = () => {
   const [bearerToken, setBearerToken] = useState('');
   const [bodyType, setBodyType] = useState<'json' | 'form'>('json');
   const [body, setBody] = useState('{\n  "message": "Hello from Security Tribe!"\n}');
+  const [formData, setFormData] = useState<{ key: string; value: string }[]>([
+    { key: 'grant_type', value: 'authorization_code' },
+    { key: 'code', value: '' },
+    { key: 'client_id', value: '' }
+  ]);
   
   const [response, setResponse] = useState<{
     status: number;
@@ -67,6 +72,7 @@ const TokenTester: React.FC = () => {
           if (savedState.bearerToken) setBearerToken(savedState.bearerToken);
           setBodyType(savedState.bodyType);
           setBody(savedState.body);
+          if (savedState.formData) setFormData(savedState.formData);
         }
       } catch (err) {
         console.error('Failed to load token tester state', err);
@@ -89,10 +95,11 @@ const TokenTester: React.FC = () => {
       basicAuth,
       bearerToken,
       bodyType,
-      body
+      body,
+      formData
     };
     saveTokenTesterState(state).catch(err => console.error('Failed to save state', err));
-  }, [isLoaded, url, method, headers, authType, basicAuth, bearerToken, bodyType, body]);
+  }, [isLoaded, url, method, headers, authType, basicAuth, bearerToken, bodyType, body, formData]);
 
   const handleAddHeader = () => {
     setHeaders([...headers, { key: '', value: '' }]);
@@ -106,6 +113,36 @@ const TokenTester: React.FC = () => {
     const newHeaders = [...headers];
     newHeaders[index][field] = value;
     setHeaders(newHeaders);
+  };
+  
+  const handleAddFormData = () => {
+    setFormData([...formData, { key: '', value: '' }]);
+  };
+
+  const handleRemoveFormData = (index: number) => {
+    const newFormData = formData.filter((_, i) => i !== index);
+    setFormData(newFormData);
+    if (bodyType === 'form') {
+      const bodyStr = newFormData
+        .filter(item => item.key.trim())
+        .map(item => `${encodeURIComponent(item.key)}=${encodeURIComponent(item.value)}`)
+        .join('&');
+      setBody(bodyStr);
+    }
+  };
+
+  const handleFormDataChange = (index: number, field: 'key' | 'value', value: string) => {
+    const newFormData = [...formData];
+    newFormData[index][field] = value;
+    setFormData(newFormData);
+    
+    if (bodyType === 'form') {
+      const bodyStr = newFormData
+        .filter(item => item.key.trim())
+        .map(item => `${encodeURIComponent(item.key)}=${encodeURIComponent(item.value)}`)
+        .join('&');
+      setBody(bodyStr);
+    }
   };
 
   const showNotification = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
@@ -453,6 +490,17 @@ const TokenTester: React.FC = () => {
                       <button 
                         onClick={() => {
                             setBodyType('json');
+                            // Sync form data to JSON body
+                            try {
+                                const obj: any = {};
+                                formData.forEach(f => {
+                                    if (f.key.trim()) obj[f.key] = f.value;
+                                });
+                                setBody(JSON.stringify(obj, null, 2));
+                            } catch (e) {
+                                // Default fallback if sync fails
+                            }
+                            
                             // Update Content-Type header if it exists
                             const ctIndex = headers.findIndex(h => h.key.toLowerCase() === 'content-type');
                             if (ctIndex !== -1) {
@@ -466,6 +514,32 @@ const TokenTester: React.FC = () => {
                       <button 
                          onClick={() => {
                              setBodyType('form');
+                             // Sync JSON body to form data
+                             try {
+                                 const obj = JSON.parse(body);
+                                 const newFormData = Object.entries(obj).map(([key, value]) => ({ 
+                                     key, 
+                                     value: typeof value === 'object' ? JSON.stringify(value) : String(value) 
+                                 }));
+                                 if (newFormData.length > 0) setFormData(newFormData);
+                                 
+                                 const bodyStr = newFormData
+                                    .filter(item => item.key.trim())
+                                    .map(item => `${encodeURIComponent(item.key)}=${encodeURIComponent(item.value)}`)
+                                    .join('&');
+                                 setBody(bodyStr);
+                             } catch (e) {
+                                 // If body is already url-encoded, try to parse it
+                                 if (body.includes('=') || body.includes('&')) {
+                                     const params = new URLSearchParams(body);
+                                     const newFormData: {key: string, value: string}[] = [];
+                                     params.forEach((value, key) => {
+                                         newFormData.push({ key, value });
+                                     });
+                                     if (newFormData.length > 0) setFormData(newFormData);
+                                 }
+                             }
+
                              // Update Content-Type header if it exists
                              const ctIndex = headers.findIndex(h => h.key.toLowerCase() === 'content-type');
                              if (ctIndex !== -1) {
@@ -478,13 +552,49 @@ const TokenTester: React.FC = () => {
                       </button>
                     </div>
                   </div>
-                  <textarea 
-                    value={body}
-                    onChange={(e) => setBody(e.target.value)}
-                    rows={6}
-                    className="w-full px-3 py-2 bg-slate-800 text-sky-400 font-mono text-xs rounded-lg focus:ring-1 focus:ring-sky-500 outline-none"
-                    placeholder={bodyType === 'json' ? '{ "key": "value" }' : 'key=value&other=thing'}
-                  />
+                  
+                  {bodyType === 'json' ? (
+                    <textarea 
+                      value={body}
+                      onChange={(e) => setBody(e.target.value)}
+                      rows={6}
+                      className="w-full px-3 py-2 bg-slate-800 text-sky-400 font-mono text-xs rounded-lg focus:ring-1 focus:ring-sky-500 outline-none"
+                      placeholder='{ "key": "value" }'
+                    />
+                  ) : (
+                    <div className="space-y-2 max-h-64 overflow-y-auto custom-scrollbar pr-1">
+                        {formData.map((item, index) => (
+                          <div key={index} className="flex space-x-2 animate-fade-in group">
+                            <input 
+                              type="text"
+                              value={item.key}
+                              onChange={(e) => handleFormDataChange(index, 'key', e.target.value)}
+                              placeholder="Key"
+                              className="flex-1 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded text-xs focus:ring-1 focus:ring-sky-500 outline-none"
+                            />
+                            <input 
+                              type="text"
+                              value={item.value}
+                              onChange={(e) => handleFormDataChange(index, 'value', e.target.value)}
+                              placeholder="Value"
+                              className="flex-1 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded text-xs focus:ring-1 focus:ring-sky-500 outline-none"
+                            />
+                            <button 
+                              onClick={() => handleRemoveFormData(index)}
+                              className="p-1.5 text-slate-300 hover:text-red-500 transition-colors"
+                            >
+                              <TrashIcon className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ))}
+                        <button 
+                            onClick={handleAddFormData}
+                            className="w-full py-2 border-2 border-dashed border-slate-200 rounded-lg text-slate-400 hover:border-sky-300 hover:text-sky-500 transition-all flex items-center justify-center text-xs font-medium"
+                        >
+                            <PlusIcon className="h-3 w-3 mr-1" /> Add Parameter
+                        </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

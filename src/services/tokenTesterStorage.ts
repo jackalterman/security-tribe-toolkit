@@ -11,6 +11,7 @@ export interface TokenTesterState {
   bearerToken?: string;
   bodyType: 'json' | 'form';
   body: string;
+  formData: { key: string; value: string }[];
 }
 
 export const openDB = (): Promise<IDBDatabase> => {
