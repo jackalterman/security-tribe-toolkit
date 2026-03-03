@@ -45,7 +45,7 @@ export interface KeyPair {
     keyId: string;
 }
 
-export type ItemType = 'certificate' | 'jwt' | 'key' | 'secret';
+export type ItemType = 'certificate' | 'jwt' | 'key' | 'secret' | 'request';
 
 export interface CollectionItem {
     id: string;

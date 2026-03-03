@@ -18,7 +18,9 @@ import {
   DownloadIcon,
   DatabaseIcon,
   EyeIcon,
-  CertificateIcon
+  CertificateIcon,
+  SaveIcon,
+  BookmarkIcon
 } from './icons';
 import { getTokenTesterState, saveTokenTesterState, TokenTesterState } from '../services/tokenTesterStorage';
 import { storageService } from '../services/storageService';
@@ -62,6 +64,10 @@ const TokenTester: React.FC = () => {
   const [variables, setVariables] = useState<{ key: string; value: string; enabled: boolean }[]>([]);
   const [showVariableManager, setShowVariableManager] = useState(false);
   const [showCurlImport, setShowCurlImport] = useState(false);
+  const [showImportDropdown, setShowImportDropdown] = useState(false);
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [saveName, setSaveName] = useState('');
+  const [collectionPickerMode, setCollectionPickerMode] = useState<'bearer' | 'import'>('bearer');
   const [showAuthDropdown, setShowAuthDropdown] = useState(false);
   const [curlCommand, setCurlCommand] = useState('');
 
@@ -278,14 +284,14 @@ const TokenTester: React.FC = () => {
     }
   };
 
-  const handleCurlImport = () => {
-    const config = fromCurl(curlCommand);
+  const handleCurlImport = (command?: string) => {
+    const targetCommand = command || curlCommand;
+    const config = fromCurl(targetCommand);
     if (config) {
       if (config.url) setUrl(config.url);
       if (config.method) setMethod(config.method);
       if (config.headers) {
           const newHeaders = config.headers.map(h => ({ ...h, enabled: true }));
-          // Merge with default/existing if they don't overlap? For now just overwrite to be safe like a real import
           setHeaders(newHeaders);
       }
       if (config.body) setBody(config.body);
@@ -295,13 +301,13 @@ const TokenTester: React.FC = () => {
       
       setShowCurlImport(false);
       setCurlCommand('');
-      showNotification('Request imported from CURL', 'success');
+      showNotification('Request imported successfully', 'success');
     } else {
       showNotification('Invalid CURL command', 'error');
     }
   };
 
-  const handleCopyAsCurl = () => {
+  const getCurlRepresentation = () => {
     let finalBody = body;
     if (bodyType === 'form') {
       finalBody = formData
@@ -316,7 +322,7 @@ const TokenTester: React.FC = () => {
       finalBody = replaceVariables(body, variables);
     }
 
-    const curl = toCurl({
+    return toCurl({
       url: replaceVariables(url, variables),
       method,
       headers: headers.map(h => ({
@@ -333,6 +339,37 @@ const TokenTester: React.FC = () => {
       },
       bearerToken: replaceVariables(bearerToken, variables)
     });
+  };
+
+  const handleSaveToCollection = async () => {
+    if (!saveName.trim()) {
+      showNotification('Please enter a name for the request', 'error');
+      return;
+    }
+
+    try {
+      const curl = getCurlRepresentation();
+      await storageService.saveItem({
+        title: saveName,
+        type: 'request',
+        content: curl,
+        metadata: {
+          url,
+          method,
+          timestamp: Date.now()
+        }
+      });
+      setShowSaveModal(false);
+      setSaveName('');
+      showNotification('Request saved to collection', 'success');
+    } catch (err) {
+      showNotification('Failed to save request', 'error');
+      console.error(err);
+    }
+  };
+
+  const handleCopyAsCurl = () => {
+    const curl = getCurlRepresentation();
     navigator.clipboard.writeText(curl);
     showNotification('CURL command copied to clipboard (variables resolved)', 'success');
   };
@@ -431,25 +468,38 @@ const TokenTester: React.FC = () => {
                       </button>
                   </div>
                   <div className="max-h-[400px] overflow-y-auto p-2 custom-scrollbar pr-1">
-                      {secrets.length === 0 ? (
-                          <div className="p-8 text-center text-slate-400 italic">No items found in collections.</div>
+                      {secrets.filter(s => {
+                          if (collectionPickerMode === 'import') return s.type === 'request';
+                          return s.type !== 'request';
+                      }).length === 0 ? (
+                          <div className="p-8 text-center text-slate-400 italic">
+                              {collectionPickerMode === 'import' ? 'No saved requests found.' : 'No items found in collections.'}
+                          </div>
                       ) : (
-                          secrets.map(s => (
+                          secrets.filter(s => {
+                              if (collectionPickerMode === 'import') return s.type === 'request';
+                              return s.type !== 'request';
+                          }).map(s => (
                               <button 
                                 key={s.id}
                                 onClick={() => {
-                                    setBearerToken(s.content);
-                                    setAuthType('bearer');
+                                    if (collectionPickerMode === 'import') {
+                                        handleCurlImport(s.content);
+                                    } else {
+                                        setBearerToken(s.content);
+                                        setAuthType('bearer');
+                                    }
                                     setShowCollectionPicker(false);
                                     showNotification(`Loaded: ${s.title}`, 'success');
                                 }}
                                 className="w-full text-left p-3 hover:bg-sky-50 rounded-xl transition-colors flex items-center group mb-1 border border-transparent hover:border-sky-100"
                               >
                                   <div className="bg-sky-100 p-2 rounded-lg mr-3 group-hover:bg-sky-200 transition-colors">
-                                      {s.type === 'key' ? <KeyIcon className="h-4 w-4 text-sky-600" /> :
-                                       s.type === 'jwt' ? <FileCodeIcon className="h-4 w-4 text-sky-600" /> :
-                                       s.type === 'certificate' ? <CertificateIcon className="h-4 w-4 text-sky-600" /> :
-                                       <DatabaseIcon className="h-4 w-4 text-sky-600" />}
+                                       {s.type === 'key' ? <KeyIcon className="h-4 w-4 text-sky-600" /> :
+                                        s.type === 'jwt' ? <FileCodeIcon className="h-4 w-4 text-sky-600" /> :
+                                        s.type === 'certificate' ? <CertificateIcon className="h-4 w-4 text-sky-600" /> :
+                                        s.type === 'request' ? <UploadIcon className="h-4 w-4 text-sky-600" /> :
+                                        <DatabaseIcon className="h-4 w-4 text-sky-600" />}
                                   </div>
                                   <div className="flex-1 min-w-0">
                                       <div className="flex items-center justify-between">
@@ -486,14 +536,49 @@ const TokenTester: React.FC = () => {
                 <DatabaseIcon className="h-4 w-4 mr-2 text-sky-500" />
                 Variables
             </button>
-            <button
-                onClick={() => setShowCurlImport(true)}
-                className="flex items-center px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors text-sm font-medium shadow-sm active:translate-y-px"
-                title="Import from CURL"
-            >
-                <UploadIcon className="h-4 w-4 mr-2 text-sky-500" />
-                Import
-            </button>
+            <div className="relative">
+                <button
+                    onClick={() => setShowImportDropdown(!showImportDropdown)}
+                    className="flex items-center px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors text-sm font-medium shadow-sm active:translate-y-px"
+                    title="Import options"
+                >
+                    <UploadIcon className="h-4 w-4 mr-2 text-sky-500" />
+                    Import
+                    <ChevronDownIcon className={`ml-2 h-4 w-4 transition-transform ${showImportDropdown ? 'rotate-180' : ''}`} />
+                </button>
+
+                {showImportDropdown && (
+                    <>
+                        <div 
+                            className="fixed inset-0 z-40" 
+                            onClick={() => setShowImportDropdown(false)}
+                        />
+                        <div className="absolute top-full right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-xl z-50 overflow-hidden animate-fade-in py-1 min-w-[200px]">
+                            <button
+                                onClick={() => {
+                                    setShowCurlImport(true);
+                                    setShowImportDropdown(false);
+                                }}
+                                className="w-full flex items-center px-4 py-2.5 text-left text-sm text-slate-600 hover:bg-sky-50 transition-colors"
+                            >
+                                <ClipboardIcon className="h-4 w-4 mr-2 text-sky-500" />
+                                Paste CURL Command
+                            </button>
+                            <button
+                                onClick={() => {
+                                    setCollectionPickerMode('import');
+                                    setShowCollectionPicker(true);
+                                    setShowImportDropdown(false);
+                                }}
+                                className="w-full flex items-center px-4 py-2.5 text-left text-sm text-slate-600 hover:bg-sky-50 transition-colors border-t border-slate-50"
+                            >
+                                <DatabaseIcon className="h-4 w-4 mr-2 text-sky-500" />
+                                Load from Collection
+                            </button>
+                        </div>
+                    </>
+                )}
+            </div>
         </div>
       </div>
 
@@ -614,9 +699,13 @@ const TokenTester: React.FC = () => {
           <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex-1">
             <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
               <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wider">Request Configuration</h2>
-              <div className="flex items-center text-xs text-slate-400 bg-white px-2 py-1 rounded border border-slate-200 italic font-mono uppercase tracking-tighter">
-                REST CLIENT
-              </div>
+              <button
+                onClick={() => setShowSaveModal(true)}
+                className="flex items-center px-3 py-1 text-[10px] font-bold text-sky-600 bg-sky-50 border border-sky-100 rounded-lg hover:bg-sky-100 transition-all uppercase tracking-tight shadow-sm active:translate-y-px"
+              >
+                <BookmarkIcon className="h-3 w-3 mr-1.5" />
+                Save to Collection
+              </button>
             </div>
             
             <div className="p-6 space-y-6">
@@ -708,6 +797,7 @@ const TokenTester: React.FC = () => {
                                 </button>
                                 <button
                                     onClick={() => {
+                                        setCollectionPickerMode('bearer');
                                         setShowCollectionPicker(true);
                                         setShowAuthDropdown(false);
                                     }}
@@ -1122,6 +1212,52 @@ const TokenTester: React.FC = () => {
           *Note: Browser-based requests are subject to CORS policies. If requests fail, ensure Target Server allows cross-origin requests.
         </div>
       </div>
+
+      {/* Save to Collection Modal */}
+      {showSaveModal && (
+          <div className="fixed inset-0 z-[100] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden animate-fade-in border border-sky-100">
+                  <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+                      <div className="flex items-center space-x-2">
+                          <BookmarkIcon className="h-5 w-5 text-sky-600" />
+                          <h3 className="font-bold text-slate-800">Save to Collection</h3>
+                      </div>
+                      <button onClick={() => setShowSaveModal(false)} className="p-1 hover:bg-sky-100 rounded-lg transition-colors">
+                          <XIcon className="h-5 w-5 text-slate-500" />
+                      </button>
+                  </div>
+                  <div className="p-6 space-y-4">
+                      <div className="space-y-2">
+                          <label className="text-xs font-bold text-slate-500 uppercase">Request Name</label>
+                          <input 
+                              type="text"
+                              value={saveName}
+                              onChange={(e) => setSaveName(e.target.value)}
+                              onKeyDown={(e) => e.key === 'Enter' && handleSaveToCollection()}
+                              placeholder="e.g., Get User Profile"
+                              className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-sky-500 outline-none"
+                              autoFocus
+                          />
+                      </div>
+                      <p className="text-[10px] text-slate-400 italic">This will save the current configuration as a CURL command in your collection.</p>
+                  </div>
+                  <div className="p-4 bg-slate-50 border-t border-slate-100 flex justify-end space-x-3">
+                      <button 
+                          onClick={() => setShowSaveModal(false)}
+                          className="px-4 py-2 text-slate-500 font-medium text-sm hover:text-slate-700"
+                      >
+                          Cancel
+                      </button>
+                      <button 
+                          onClick={handleSaveToCollection}
+                          className="px-6 py-2 bg-sky-600 text-white rounded-lg font-bold text-sm hover:bg-sky-700 transition-all shadow-md active:translate-y-px"
+                      >
+                          Save Request
+                      </button>
+                  </div>
+              </div>
+          </div>
+      )}
 
       <style dangerouslySetInnerHTML={{ __html: `
         .custom-scrollbar::-webkit-scrollbar {
