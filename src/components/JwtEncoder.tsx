@@ -4,7 +4,7 @@ import CodeBlock from './CodeBlock';
 import { jwtService } from '../services/jwtService';
 import { storageService } from '../services/storageService';
 import { getJwtEncoderState, saveJwtEncoderState, JwtEncoderState } from '../services/jwtStorage';
-import { SendIcon, KeyIcon, SaveIcon, RefreshIcon, DownloadIcon, ShieldCheckIcon, CertificateIcon, TrashIcon, XIcon, PlusIcon, LockClosedIcon } from './icons';
+import { SendIcon, KeyIcon, SaveIcon, RefreshIcon, DownloadIcon, ShieldCheckIcon, CertificateIcon, TrashIcon, XIcon, PlusIcon, LockClosedIcon, ChevronDownIcon, FileCodeIcon, DatabaseIcon } from './icons';
 import { keyParsingService, ParsedKeyResult } from '../services/keyParsingService';
 import type { DecoderData } from '../types';
 
@@ -35,6 +35,9 @@ const JwtEncoder: React.FC<JwtEncoderProps> = ({ onSendToDecoder }) => {
   const [password, setPassword] = useState('');
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [successMessage, setSuccessMessage] = useState('');
+  const [showCollectionPicker, setShowCollectionPicker] = useState(false);
+  const [showUploadDropdown, setShowUploadDropdown] = useState(false);
+  const [collections, setCollections] = useState<any[]>([]);
 
   // Load state from IndexedDB
   useEffect(() => {
@@ -56,6 +59,21 @@ const JwtEncoder: React.FC<JwtEncoderProps> = ({ onSendToDecoder }) => {
     };
     loadState();
   }, []);
+
+  // Load collections when picker is opened
+  useEffect(() => {
+    if (showCollectionPicker) {
+      const loadCollections = async () => {
+        try {
+          const items = await storageService.getItems();
+          setCollections(items);
+        } catch (err) {
+          console.error('Failed to load collections', err);
+        }
+      };
+      loadCollections();
+    }
+  }, [showCollectionPicker]);
 
   // Save state to IndexedDB
   useEffect(() => {
@@ -157,6 +175,34 @@ const JwtEncoder: React.FC<JwtEncoderProps> = ({ onSendToDecoder }) => {
     if (result.publicKey) setPublicKey(result.publicKey);
     setSuccessMessage(`Loaded ${result.format} ${result.type}`);
     setTimeout(() => setSuccessMessage(''), 3000);
+  };
+
+  const handleCollectionItemSelect = (item: any) => {
+    if (item.type === 'key') {
+        setPrivateKey(item.content);
+        setShowSecret(true);
+        // Auto-derive public key if possible
+        if (alg !== 'HS256') {
+            const derivedPublic = keyParsingService.derivePublicKey(item.content);
+            if (derivedPublic) setPublicKey(derivedPublic);
+        }
+    } else if (item.type === 'certificate') {
+        setPublicKey(item.content);
+    } else if (item.type === 'jwt') {
+        if (alg === 'HS256') {
+            setSecret(item.content);
+            setShowSecret(true);
+        } else {
+            setPrivateKey(item.content);
+            setShowSecret(true);
+            // Auto-derive public key if possible
+            const derivedPublic = keyParsingService.derivePublicKey(item.content);
+            if (derivedPublic) setPublicKey(derivedPublic);
+        }
+    }
+    setSuccessMessage(`Loaded from collection: ${item.title}`);
+    setTimeout(() => setSuccessMessage(''), 3000);
+    setShowCollectionPicker(false);
   };
 
   const handleSaveToCollection = async (type: 'jwt' | 'key' | 'certificate') => {
@@ -283,10 +329,44 @@ const JwtEncoder: React.FC<JwtEncoderProps> = ({ onSendToDecoder }) => {
                     >
                         <KeyIcon className="h-4 w-4 text-sky-500" /> New Keys
                     </button>
-                    <label className="flex-1 inline-flex justify-center items-center gap-2 py-2.5 px-4 border border-slate-300 shadow-sm text-sm font-medium rounded-lg text-slate-700 bg-white hover:bg-slate-50 cursor-pointer transition-colors">
-                        <DownloadIcon className="h-4 w-4 text-sky-500" /> Upload Key
-                        <input type="file" className="hidden" onChange={handleFileUpload} />
-                    </label>
+                    
+                    <div className="flex-1 relative">
+                        <button
+                            onClick={() => setShowUploadDropdown(!showUploadDropdown)}
+                            className={`w-full flex items-center justify-center gap-2 py-2.5 px-4 border shadow-sm text-sm font-medium rounded-lg transition-all ${
+                                showUploadDropdown 
+                                ? 'bg-sky-50 border-sky-200 text-sky-700' 
+                                : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
+                            }`}
+                        >
+                            <DownloadIcon className="h-4 w-4 text-sky-500" />
+                            <span>Upload Key</span>
+                            <ChevronDownIcon className={`h-4 w-4 text-slate-400 transition-transform ${showUploadDropdown ? 'rotate-180' : ''}`} />
+                        </button>
+
+                        {showUploadDropdown && (
+                            <>
+                                <div className="fixed inset-0 z-40" onClick={() => setShowUploadDropdown(false)} />
+                                <div className="absolute top-full right-0 mt-1 w-full bg-white border border-slate-200 rounded-lg shadow-xl z-50 overflow-hidden animate-fade-in py-1 min-w-[180px]">
+                                    <label className="w-full flex items-center px-4 py-2 text-left text-xs text-slate-600 hover:bg-sky-50 transition-colors cursor-pointer">
+                                        <DownloadIcon className="h-4 w-4 mr-2 text-sky-500" />
+                                        Upload File
+                                        <input type="file" className="hidden" onChange={(e) => { handleFileUpload(e); setShowUploadDropdown(false); }} />
+                                    </label>
+                                    <button
+                                        onClick={() => {
+                                            setShowCollectionPicker(true);
+                                            setShowUploadDropdown(false);
+                                        }}
+                                        className="w-full flex items-center px-4 py-2 text-left text-xs text-slate-600 hover:bg-sky-50 transition-colors border-t border-slate-50"
+                                    >
+                                        <DatabaseIcon className="h-4 w-4 mr-2 text-sky-500" />
+                                        Load from Collection
+                                    </button>
+                                </div>
+                            </>
+                        )}
+                    </div>
                 </div>
 
                 {successMessage && (
@@ -332,7 +412,7 @@ const JwtEncoder: React.FC<JwtEncoderProps> = ({ onSendToDecoder }) => {
                             className="text-[10px] text-slate-500 hover:text-sky-600 font-bold uppercase tracking-tight flex items-center gap-1"
                             disabled={!publicKey}
                         >
-                            <SaveIcon className="h-3 w-3" /> Save
+                            <SaveIcon className="h-3 w-3" /> Save to Coll.
                         </button>
                     </div>
                     <textarea
@@ -389,7 +469,7 @@ const JwtEncoder: React.FC<JwtEncoderProps> = ({ onSendToDecoder }) => {
         {generatedToken ? (
             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 animate-fade-in">
                 <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Encoded Token</label>
-                <CodeBlock content={generatedToken} />
+                <CodeBlock content={generatedToken} variant="output" />
                 <div className="mt-6 p-4 bg-sky-50 rounded-lg border border-sky-100">
                     <h4 className="text-sm font-bold text-sky-900 mb-2">Next Step</h4>
                     <p className="text-sm text-sky-700 mb-4">
@@ -469,6 +549,50 @@ const JwtEncoder: React.FC<JwtEncoderProps> = ({ onSendToDecoder }) => {
                 </div>
             </div>
         </div>
+      )}
+
+      {/* Collection Picker Modal */}
+      {showCollectionPicker && (
+          <div className="fixed inset-0 z-[100] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-fade-in border border-slate-200">
+                  <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
+                      <div className="flex items-center space-x-2">
+                        <DatabaseIcon className="h-5 w-5 text-sky-600" />
+                        <h3 className="font-bold text-slate-800">Load from Collection</h3>
+                      </div>
+                      <button onClick={() => setShowCollectionPicker(false)} className="p-1 hover:bg-slate-200 rounded-lg transition-colors">
+                          <XIcon className="h-5 w-5 text-slate-500" />
+                      </button>
+                  </div>
+                  <div className="max-h-[400px] overflow-y-auto p-2 custom-scrollbar pr-1">
+                      {collections.length === 0 ? (
+                          <div className="p-8 text-center text-slate-400 italic">No items found in collections.</div>
+                      ) : (
+                          collections.map(s => (
+                              <button 
+                                key={s.id}
+                                onClick={() => handleCollectionItemSelect(s)}
+                                className="w-full text-left p-3 hover:bg-sky-50 rounded-xl transition-colors flex items-center group mb-1 border border-transparent hover:border-sky-100"
+                              >
+                                  <div className="bg-sky-100 p-2 rounded-lg mr-3 group-hover:bg-sky-200 transition-colors">
+                                      {s.type === 'key' ? <KeyIcon className="h-4 w-4 text-sky-600" /> :
+                                       s.type === 'jwt' ? <FileCodeIcon className="h-4 w-4 text-sky-600" /> :
+                                       s.type === 'certificate' ? <CertificateIcon className="h-4 w-4 text-sky-600" /> :
+                                       <DatabaseIcon className="h-4 w-4 text-sky-600" />}
+                                  </div>
+                                  <div className="flex-1 min-w-0">
+                                      <div className="flex items-center justify-between">
+                                        <div className="font-semibold text-sm text-slate-700 truncate">{s.title}</div>
+                                        <span className="text-[9px] font-bold text-sky-500 uppercase px-1.5 py-0.5 bg-sky-50 rounded border border-sky-100">{s.type}</span>
+                                      </div>
+                                      <div className="text-[10px] text-slate-400 font-mono truncate">{s.content}</div>
+                                  </div>
+                              </button>
+                          ))
+                      )}
+                  </div>
+              </div>
+          </div>
       )}
     </div>
   );

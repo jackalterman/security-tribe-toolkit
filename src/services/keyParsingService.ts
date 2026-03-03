@@ -143,5 +143,25 @@ export const keyParsingService = {
         } catch (e) {
             throw new Error('Failed to parse JWK JSON.');
         }
+    },
+
+    /**
+     * Derives a Public Key from a Private Key PEM string.
+     * Currently supports RSA.
+     */
+    derivePublicKey(privateKeyPem: string): string | null {
+        try {
+            if (privateKeyPem.includes('BEGIN RSA PRIVATE KEY') || privateKeyPem.includes('BEGIN PRIVATE KEY')) {
+                // forge can handle both PKCS#1 and PKCS#8 RSA keys
+                const privateKey = forge.pki.privateKeyFromPem(privateKeyPem);
+                // Extract public key and convert to PEM
+                const publicKey = forge.pki.setRsaPublicKey(privateKey.n, privateKey.e);
+                return forge.pki.publicKeyToPem(publicKey);
+            }
+            return null;
+        } catch (e) {
+            console.error('Failed to derive public key:', e);
+            return null;
+        }
     }
 };
