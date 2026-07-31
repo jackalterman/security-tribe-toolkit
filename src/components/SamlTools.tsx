@@ -8,12 +8,54 @@ import { FileCodeIcon, SendIcon, ShieldCheckIcon, SearchIcon, ClipboardIcon, Tra
 
 type SamlView = 'Inspector' | 'Response Gen' | 'Request Gen' | 'Metadata' | 'Sig Analyzer';
 
+type SamlSummary = {
+    issuer?: string;
+    subject?: string;
+    audience?: string;
+    destination?: string;
+    notBefore?: string;
+    notOnOrAfter?: string;
+    error?: string;
+};
+
 const SamlTools: React.FC = () => {
     const [activeView, setActiveView] = usePersistentState<SamlView>('saml-active-view', 'Inspector');
     const [rawXml, setRawXml] = usePersistentState('saml-raw-xml', '');
     const [prettyXml, setPrettyXml] = usePersistentState('saml-pretty-xml', '');
     const [sigAnalysis, setSigAnalysis] = useState<any>(null);
+    const [samlSummary, setSamlSummary] = useState<SamlSummary | null>(null);
     const [copySuccess, setCopySuccess] = useState(false);
+
+    const parseSamlSummary = (xml: string): SamlSummary => {
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(xml, 'application/xml');
+        if (doc.querySelector('parsererror')) {
+            return { error: 'Invalid XML input' };
+        }
+
+        const samlNS = 'urn:oasis:names:tc:SAML:2.0:assertion';
+        const getText = (namespace: string, localName: string) => doc.getElementsByTagNameNS(namespace, localName)[0]?.textContent?.trim();
+
+        const issuer = getText(samlNS, 'Issuer') || getText('', 'Issuer');
+        const subject = getText(samlNS, 'NameID') || getText('', 'NameID');
+        const audience = getText(samlNS, 'Audience') || getText('', 'Audience');
+
+        const responseElement = doc.documentElement;
+        const destination = responseElement?.getAttribute('Destination') || undefined;
+
+        const conditions = doc.getElementsByTagNameNS(samlNS, 'Conditions')[0];
+        const notBefore = conditions?.getAttribute('NotBefore') || undefined;
+        const notOnOrAfter = conditions?.getAttribute('NotOnOrAfter') || undefined;
+
+        return {
+            issuer,
+            subject,
+            audience,
+            destination,
+            notBefore,
+            notOnOrAfter
+        };
+    };
 
     // Response State
     const [issuer, setIssuer] = usePersistentState('saml-resp-issuer', 'https://idp.example.com');
@@ -50,8 +92,11 @@ const SamlTools: React.FC = () => {
             }
 
             setPrettyXml(xmlService.formatXml(xml));
+            const summary = parseSamlSummary(xml);
+            setSamlSummary(summary.error ? null : summary);
         } catch (e) {
             setPrettyXml('Invalid XML or Base64 Input');
+            setSamlSummary({ error: 'Invalid XML or Base64 Input' });
         }
     };
 
@@ -92,6 +137,7 @@ const SamlTools: React.FC = () => {
         });
         setRawXml(xml);
         setPrettyXml(xmlService.formatXml(xml));
+        setSamlSummary(parseSamlSummary(xml));
     };
 
     const handleGenerateRequest = () => {
@@ -100,6 +146,7 @@ const SamlTools: React.FC = () => {
         });
         setRawXml(xml);
         setPrettyXml(xmlService.formatXml(xml));
+        setSamlSummary(parseSamlSummary(xml));
     };
 
     const handleGenerateMetadata = () => {
@@ -110,6 +157,7 @@ const SamlTools: React.FC = () => {
         });
         setRawXml(xml);
         setPrettyXml(xmlService.formatXml(xml));
+        setSamlSummary(parseSamlSummary(xml));
     };
 
     const sendToBase64 = () => {
@@ -140,6 +188,37 @@ const SamlTools: React.FC = () => {
                     </h2>
                     <p className="text-slate-600">Inspect, decode, and generate SAML Assertions, Requests, and Metadata.</p>
                 </div>
+                {activeView === 'Inspector' && samlSummary && !samlSummary.error && (
+                    <div className="bg-slate-100 p-4 rounded-xl border border-slate-200 text-sm text-slate-700 max-w-md">
+                        <h3 className="font-bold text-slate-900 mb-3">SAML Summary</h3>
+                        <div className="grid grid-cols-1 gap-2 text-xs">
+                            <div className="flex justify-between">
+                                <span className="text-slate-500">Issuer</span>
+                                <span className="font-mono text-slate-800 break-all">{samlSummary.issuer || '—'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                                <span className="text-slate-500">Subject</span>
+                                <span className="font-mono text-slate-800 break-all">{samlSummary.subject || '—'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                                <span className="text-slate-500">Audience</span>
+                                <span className="font-mono text-slate-800 break-all">{samlSummary.audience || '—'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                                <span className="text-slate-500">Destination</span>
+                                <span className="font-mono text-slate-800 break-all">{samlSummary.destination || '—'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                                <span className="text-slate-500">Valid From</span>
+                                <span className="font-mono text-slate-800 break-all">{samlSummary.notBefore || '—'}</span>
+                            </div>
+                            <div className="flex justify-between">
+                                <span className="text-slate-500">Valid Until</span>
+                                <span className="font-mono text-slate-800 break-all">{samlSummary.notOnOrAfter || '—'}</span>
+                            </div>
+                        </div>
+                    </div>
+                )}
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
