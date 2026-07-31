@@ -1,15 +1,36 @@
 
 export const xmlService = {
   formatXml(xml: string): string {
-    let formatted = '';
-    let indent = '';
     const tab = '  ';
-    xml.split(/>\s*</).forEach(function(node) {
-        if (node.match( /^\/\w/ )) indent = indent.substring(tab.length);
-        formatted += indent + '<' + node + '>\r\n';
-        if (node.match( /^<?\w[^>]*[^\/]$/ )) indent += tab;
+    const normalized = xml.replace(/\r\n/g, '\n').trim();
+    const nodes = normalized.replace(/>\s*</g, '><').replace(/>(?=<)/g, '>\r\n').split(/\r\n/);
+
+    let formatted = '';
+    let indentLevel = 0;
+
+    nodes.forEach((node) => {
+      if (!node) {
+        return;
+      }
+
+      const trimmed = node.trim();
+      const isClosingTag = /^<\//.test(trimmed);
+      const isSelfClosing = /<[^>]+\/>$/.test(trimmed);
+      const isDeclaration = /^<\?/.test(trimmed);
+      const isComment = /^<!--/.test(trimmed);
+
+      if (isClosingTag) {
+        indentLevel = Math.max(indentLevel - 1, 0);
+      }
+
+      formatted += tab.repeat(indentLevel) + trimmed + '\r\n';
+
+      if (!isClosingTag && !isSelfClosing && !isDeclaration && !isComment && /^<[^>]+>$/g.test(trimmed)) {
+        indentLevel += 1;
+      }
     });
-    return formatted.substring(1, formatted.length-3);
+
+    return formatted.trim();
   },
 
   generateMockSamlResponse(params: {
