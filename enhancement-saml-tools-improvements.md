@@ -12,7 +12,8 @@ Nothing here requires reworking the fix guide's chunk plan or the
 [HAR-to-Flow Reconstruction guide](./enhancement-har-flow-reconstruction.md). These
 are additive, later chunks that build on top once the decode pipeline is solid.
 
-No code changes have been made yet — this is the idea list and sequencing only.
+**Status:** Fix guide Chunks 1–9 are complete. Of this document's chunks, 10 and 11
+are implemented (see below); 12–17 are still idea/design-only.
 
 ---
 
@@ -27,7 +28,7 @@ truncated-bracket bug described in the fix guide's Chunk 1. Worth remembering:
 
 ## Ideas (Ranked by Likely Value)
 
-### **1. Structured "Assertion Summary" card** ⭐⭐⭐⭐⭐
+### **1. Structured "Assertion Summary" card** ⭐⭐⭐⭐⭐ — ✅ **Already implemented**
 **Why it matters:** Most people opening a decoded SAML response don't want to read
 indented XML — they want five facts: Issuer, Subject/NameID, Audience,
 Destination/ACS, and the validity window (`NotBefore`/`NotOnOrAfter`).
@@ -36,9 +37,12 @@ Destination/ACS, and the validity window (`NotBefore`/`NotOnOrAfter`).
 decoded document. Raw XML stays available underneath for anyone who wants it — this
 doesn't replace the current view, it adds a friendlier default.
 
+**Status:** Present in `SamlTools.tsx` as the "SAML Summary" card (Inspector tab),
+populated by `parseSamlSummary()`.
+
 ---
 
-### **2. Attribute table, extracted and readable** ⭐⭐⭐⭐⭐
+### **2. Attribute table, extracted and readable** ⭐⭐⭐⭐⭐ — ✅ **Implemented**
 **Why it matters:** Given the Pega use case leans heavily on attribute mapping
 (role, operator ID, etc. — see the HAR-to-Flow guide), a clean name/value table
 pulled from `<saml:AttributeStatement>` is probably the single highest-value addition
@@ -47,6 +51,10 @@ for actual day-to-day debugging, more so than any XML-reading feature.
 **Idea:** Table view, same visual language as the rest of the toolkit (see
 `JsonViewer` used elsewhere for decoded JWT payloads) — copy-individual-value support
 would be a nice small addition here too.
+
+**Status:** `parseSamlSummary()` now extracts `<saml:Attribute>` (Name/FriendlyName +
+joined `AttributeValue`s, with a non-namespaced fallback) and renders it as a table
+appended to the SAML Summary card, with a hover-to-reveal per-row copy button.
 
 ---
 
@@ -128,20 +136,23 @@ Doubles as a debugging aid and reinforces the toolkit's educational bent (explai
 These are written as Chunks 10+ to sit after the fix guide's existing Chunks 1–9
 without renumbering anything already planned there.
 
-| Chunk | Scope | Depends on |
-|---|---|---|
-| **10. Assertion Summary card** | Parse and display Issuer/Subject/Audience/Destination/validity window. | Fix guide Chunk 1 (needs correctly-formatted/parsed XML to extract from) |
-| **11. Attribute table** | Extract and render `<saml:AttributeStatement>` as a table. | Fix guide Chunk 1 |
-| **12. Validation checklist** | Extend Sig Analyzer with pass/fail checks beyond algorithm reporting. | Fix guide Chunk 2 (accurate parse-error handling) |
-| **13. SAML Diff view** | New comparison view modeled on `TokenDiff.tsx`. | Fix guide Chunk 1 |
-| **14. History / storage** | Reuse `harStorage.ts`/`jwtStorage.ts` pattern for SAML documents. | none — independent |
-| **15. Paste-whole-request extraction** | Auto-extract `SAMLRequest`/`SAMLResponse` from a full pasted HTTP message. | none — independent |
-| **16. Encoding-path breadcrumb** | Surface detected decode path in the UI. | Fix guide Chunk 3 (shared decode pipeline) |
-| **17. Real signature verification** | WebCrypto-based XML-DSig verification against a supplied certificate. | Fix guide Chunk 1; likely reuses `CertificateAnalyzer`/`KeyManager` logic |
+| Chunk | Scope | Depends on | Status |
+|---|---|---|---|
+| **10. Assertion Summary card** | Parse and display Issuer/Subject/Audience/Destination/validity window. | Fix guide Chunk 1 (needs correctly-formatted/parsed XML to extract from) | ✅ Done |
+| **11. Attribute table** | Extract and render `<saml:AttributeStatement>` as a table. | Fix guide Chunk 1 | ✅ Done |
+| **12. Validation checklist** | Extend Sig Analyzer with pass/fail checks beyond algorithm reporting. | Fix guide Chunk 2 (accurate parse-error handling) | Not started |
+| **13. SAML Diff view** | New comparison view modeled on `TokenDiff.tsx`. | Fix guide Chunk 1 | Not started |
+| **14. History / storage** | Reuse `harStorage.ts`/`jwtStorage.ts` pattern for SAML documents. | none — independent | Not started |
+| **15. Paste-whole-request extraction** | Auto-extract `SAMLRequest`/`SAMLResponse` from a full pasted HTTP message. | none — independent | Not started |
+| **16. Encoding-path breadcrumb** | Surface detected decode path in the UI. | Fix guide Chunk 3 (shared decode pipeline) | Not started |
+| **17. Real signature verification** | WebCrypto-based XML-DSig verification against a supplied certificate. | Fix guide Chunk 1; likely reuses `CertificateAnalyzer`/`KeyManager` logic | Not started |
 
-**Suggested starting point once the fix guide's Chunk 1 lands:** Chunk 11 (attribute
-table) — smallest surface area, highest day-to-day value for the Pega/SSO debugging
-use case specifically.
+**Suggested starting point once the fix guide's Chunk 1 lands:** ~~Chunk 11 (attribute
+table)~~ — done. Chunk 16 (encoding-path breadcrumb) is now unblocked too, since the
+fix guide's Chunk 3/4 (shared decode pipeline + DEFLATE) both landed alongside this
+work — it's a small UI-only addition on top of `decodeSamlInput()`'s existing
+`detected` label. Otherwise, next logical pick is Chunk 12 (validation checklist),
+which only needed Chunk 2 (also done).
 
 ---
 
@@ -160,5 +171,5 @@ use case specifically.
 
 ---
 
-*Document created as a design reference before implementation. No code changes have
-been made to the project yet.*
+*Document created as a design reference before implementation. Chunks 10 and 11 have
+since been implemented; see the Status notes above. Chunks 12–17 remain design-only.*

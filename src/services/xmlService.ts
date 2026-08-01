@@ -1,4 +1,15 @@
 
+export interface ParsedSamlAssertion {
+  issuer?: string;
+  nameId?: string;
+  nameIdFormat?: string;
+  statusCode?: string;
+  destination?: string;
+  audience?: string;
+  inResponseTo?: string;
+  attributes: Record<string, string>;
+}
+
 export const xmlService = {
   /**
    * Decodes SAML input trying, in order: raw XML -> base64 -> base64 + DEFLATE
@@ -244,5 +255,82 @@ export const xmlService = {
   </md:IDPSSODescriptor>
   `}
 </md:EntityDescriptor>`.trim();
+  },
+
+  /**
+   * Parses already-decoded SAML XML (a SAMLRequest or SAMLResponse document)
+   * and extracts the fields the HAR-to-Flow Reconstruction detector needs:
+   * Issuer, NameID (+ format), status, and any Attributes. Namespace-prefix
+   * agnostic — real-world captures use varying prefixes (saml:, saml2:, or
+   * none), so elements are matched by local name rather than qualified name.
+   *
+   * Throws if the XML fails to parse; callers should treat that as "not a
+   * valid SAML document" rather than silently returning empty data.
+   */
+  parseSamlXml(xml: string): ParsedSamlAssertion {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xml, 'text/xml');
+    const parserError = doc.getElementsByTagName('parsererror')[0];
+    if (parserError) {
+      throw new Error('Unable to parse SAML XML: ' + (parserError.textContent || 'malformed document'));
+    }
+
+    const byLocalName = (localName: string): Element[] => {
+      const all = doc.getElementsByTagName('*');
+      const matches: Element[] = [];
+      for (let i = 0; i < all.length; i++) {
+        if (all[i].localName === localName) matches.push(all[i]);
+      }
+      return matches;
+    };
+
+    // Prefer the first Issuer in document order. A Response typically has a
+    // top-level Issuer and a nested Assertion Issuer with the same value; if
+    // they ever differ, the top-level (first) one wins as the "authoritative"
+    // one for correlation purposes.
+    const issuerEl = byLocalName('Issuer')[0];
+    const nameIdEl = byLocalName('NameID')[0];
+    const statusCodeEl = byLocalName('StatusCode')[0];
+    const audienceEl = byLocalName('Audience')[0];
+    const rootEl = byLocalName('Response')[0] || byLocalName('AuthnRequest')[0];
+
+    const attributes: Record<string, string> = {};
+    byLocalName('Attribute').forEach(attrEl => {
+      const name = attrEl.getAttribute('Name') || attrEl.getAttribute('FriendlyName') || 'unknown';
+      const values: string[] = [];
+      const children = attrEl.getElementsByTagName('*');
+      for (let i = 0; i < children.length; i++) {
+        if (children[i].localName === 'AttributeValue') {
+          const text = children[i].textContent?.trim();
+          if (text) values.push(text);
+        }
+      }
+      if (values.length > 0) {
+        attributes[name] = values.join(', ');
+      }
+    });
+
+    return {
+      issuer: issuerEl?.textContent?.trim() || undefined,
+      nameId: nameIdEl?.textContent?.trim() || undefined,
+      nameIdFormat: nameIdEl?.getAttribute('Format') || undefined,
+      statusCode: statusCodeEl?.getAttribute('Value') || undefined,
+      destination: rootEl?.getAttribute('Destination') || undefined,
+      audience: audienceEl?.textContent?.trim() || undefined,
+      inResponseTo: rootEl?.getAttribute('InResponseTo') || undefined,
+      attributes,
+    };
+  },
+
+  /**
+   * Convenience wrapper for the common case: takes a raw SAMLRequest/
+   * SAMLResponse value straight off the wire (still base64/DEFLATE encoded,
+   * as captured in a HAR) and returns both the decoded XML and the parsed
+   * fields in one call.
+   */
+  async parseSamlResponse(raw: string): Promise<ParsedSamlAssertion & { xml: string; detected: string }> {
+    const { xml, detected } = await this.decodeSamlInput(raw);
+    const parsed = this.parseSamlXml(xml);
+    return { ...parsed, xml, detected };
   }
 };

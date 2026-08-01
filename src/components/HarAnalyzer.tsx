@@ -20,15 +20,18 @@ import {
 import { HarRoot, HarEntry, filterEntries, parseHarFile } from '../services/har';
 import { saveHarToDB, getHarFromDB, clearHarFromDB, getHarMetadataFromDB, deleteHarFromDB, HarMetadata } from '../services/harStorage';
 import { jwtService } from '../services/jwtService';
+import { detectFlows, hasUnreconstructedSamlTraffic, DetectedFlow } from '../services/harFlowDetector';
 import JsonViewer from './JsonViewer';
 
 const PEGA_COOKIES = ['Pega-AAT', 'Pega-Perf', 'Pega-RULES', 'Pega-ThreadName', 'Pega-UI-SessId'];
 
 interface HarAnalyzerProps {
   onSendToDecoder?: (data: any) => void;
+  /** Navigates to the Flow Visualizer pre-loaded with a real, HAR-reconstructed login flow. */
+  onViewFlow?: (flow: DetectedFlow) => void;
 }
 
-const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder }) => {
+const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder, onViewFlow }) => {
   const [harData, setHarData] = useState<HarRoot | null>(null);
   const [savedHars, setSavedHars] = useState<HarMetadata[]>([]);
   const [currentHarId, setCurrentHarId] = usePersistentState<string | null>('har-current-id', null);
@@ -196,6 +199,20 @@ const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder }) => {
     };
   }, [harData]);
 
+  // HAR-to-Flow Reconstruction (see enhancement-har-flow-reconstruction.md).
+  // Chunk 2: detection banner wiring. Only OAuth2/OIDC flows are fully
+  // reconstructed today (Chunk 1 scope) — SAML traffic is flagged separately
+  // so we can tell the user it was seen but isn't reconstructable yet.
+  const detectedFlows = useMemo(() => {
+    if (!harData) return [];
+    return detectFlows(harData);
+  }, [harData]);
+
+  const hasUnreconstructedSaml = useMemo(() => {
+    if (!harData) return false;
+    return hasUnreconstructedSamlTraffic(harData);
+  }, [harData]);
+
   const handleCopy = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
     setCopied(id);
@@ -256,6 +273,41 @@ const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder }) => {
         </div>
       ) : (
         <>
+            {/* SSO Flow Detection Banner (HAR-to-Flow Reconstruction) */}
+            {(detectedFlows.length > 0 || hasUnreconstructedSaml) && (
+                <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 space-y-2 shrink-0">
+                    {detectedFlows.length > 0 && (
+                        <div className="space-y-2">
+                            <p className="text-xs font-bold text-indigo-800 uppercase tracking-wider">
+                                🔗 {detectedFlows.length} SSO {detectedFlows.length === 1 ? 'flow' : 'flows'} detected
+                            </p>
+                            {detectedFlows.map(flow => (
+                                <div key={flow.id} className="flex items-center justify-between gap-3 bg-white rounded-lg border border-indigo-100 px-3 py-2">
+                                    <div className="text-xs text-indigo-900">
+                                        <span className="font-bold">{flow.kind === 'oauth-oidc' ? 'OAuth2/OIDC' : flow.kind === 'saml' ? 'SAML' : 'Device'} login</span>
+                                        {' '}via <span className="font-bold">{flow.idpDisplayName}</span> → Pega, started{' '}
+                                        <span className="font-mono">{new Date(flow.startedAt).toLocaleTimeString()}</span>
+                                    </div>
+                                    {onViewFlow && (
+                                        <button
+                                            onClick={() => onViewFlow(flow)}
+                                            className="shrink-0 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold rounded-lg transition-colors"
+                                        >
+                                            View in Flow Visualizer
+                                        </button>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    {hasUnreconstructedSaml && (
+                        <p className="text-[11px] text-indigo-700 italic">
+                            SAML traffic was also detected in this HAR, but full step-by-step reconstruction for SAML isn't available yet — coming in a future update.
+                        </p>
+                    )}
+                </div>
+            )}
+
             {/* Stats Dashboard */}
             <div className="grid grid-cols-4 gap-4">
                 {[

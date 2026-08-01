@@ -30,10 +30,12 @@ import LogoutExplorer from './components/LogoutExplorer';
 import TokenTester from './components/TokenTester';
 import { usePersistentState } from './hooks/usePersistentState';
 import type { DecoderData } from './types';
+import type { DetectedFlow } from './services/harFlowDetector';
 
 const App: React.FC = () => {
   const [activeView, setActiveView] = usePersistentState<AppView>('app-active-view', AppView.DECODE);
   const [decoderInitialData, setDecoderInitialData] = useState<DecoderData | null>(null);
+  const [flowInitialData, setFlowInitialData] = useState<DetectedFlow | null>(null);
 
   React.useEffect(() => {
     const handleViewChange = (e: any) => {
@@ -46,6 +48,12 @@ const App: React.FC = () => {
   const handleSendToDecoder = (data: DecoderData) => {
     setDecoderInitialData(data);
     setActiveView(AppView.DECODE);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleViewFlow = (flow: DetectedFlow) => {
+    setFlowInitialData(flow);
+    setActiveView(AppView.FLOWS);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -67,7 +75,13 @@ const App: React.FC = () => {
       case AppView.SIMULATE:
         return <FailureSimulator onSendToDecoder={handleSendToDecoder} />;
       case AppView.FLOWS:
-        return <FlowVisualizer onSendToDecoder={handleSendToDecoder} />;
+        return (
+          <FlowVisualizer
+            onSendToDecoder={handleSendToDecoder}
+            initialFlowData={flowInitialData}
+            onFlowDataHandled={() => setFlowInitialData(null)}
+          />
+        );
       case AppView.PKCE:
         return <PkceGenerator />;
       case AppView.DIFF:
@@ -101,7 +115,7 @@ const App: React.FC = () => {
       case AppView.CRON:
         return <CronParser />;
       case AppView.HAR_ANALYZER:
-        return <HarAnalyzer onSendToDecoder={handleSendToDecoder} />;
+        return <HarAnalyzer onSendToDecoder={handleSendToDecoder} onViewFlow={handleViewFlow} />;
       case AppView.COLLECTIONS:
         return <CollectionsView />;
       case AppView.OIDC_DISCOVERY:
