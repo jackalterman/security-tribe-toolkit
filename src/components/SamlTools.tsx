@@ -15,16 +15,26 @@ type SamlSummary = {
     destination?: string;
     notBefore?: string;
     notOnOrAfter?: string;
+    attributes?: { name: string; value: string }[];
     error?: string;
 };
 
 const SamlTools: React.FC = () => {
     const [activeView, setActiveView] = usePersistentState<SamlView>('saml-active-view', 'Inspector');
-    const [rawXml, setRawXml] = usePersistentState('saml-raw-xml', '');
+    const [inspectorInput, setInspectorInput] = usePersistentState('saml-inspector-input', '');
+    const [sigAnalyzerInput, setSigAnalyzerInput] = usePersistentState('saml-sig-input', '');
     const [prettyXml, setPrettyXml] = usePersistentState('saml-pretty-xml', '');
     const [sigAnalysis, setSigAnalysis] = useState<any>(null);
     const [samlSummary, setSamlSummary] = useState<SamlSummary | null>(null);
     const [copySuccess, setCopySuccess] = useState(false);
+    const [detectedEncoding, setDetectedEncoding] = useState<string | null>(null);
+    const [copiedAttrIndex, setCopiedAttrIndex] = useState<number | null>(null);
+
+    const copyAttrValue = (value: string, index: number) => {
+        navigator.clipboard.writeText(value);
+        setCopiedAttrIndex(index);
+        setTimeout(() => setCopiedAttrIndex(null), 1500);
+    };
 
     const parseSamlSummary = (xml: string): SamlSummary => {
         const parser = new DOMParser();
@@ -35,6 +45,11 @@ const SamlTools: React.FC = () => {
 
         const samlNS = 'urn:oasis:names:tc:SAML:2.0:assertion';
         const getText = (namespace: string, localName: string) => doc.getElementsByTagNameNS(namespace, localName)[0]?.textContent?.trim();
+        const getElements = (namespace: string, localName: string): Element[] => {
+            const nsEls = Array.from(doc.getElementsByTagNameNS(namespace, localName));
+            if (nsEls.length > 0) return nsEls;
+            return Array.from(doc.getElementsByTagNameNS('', localName));
+        };
 
         const issuer = getText(samlNS, 'Issuer') || getText('', 'Issuer');
         const subject = getText(samlNS, 'NameID') || getText('', 'NameID');
@@ -47,13 +62,21 @@ const SamlTools: React.FC = () => {
         const notBefore = conditions?.getAttribute('NotBefore') || undefined;
         const notOnOrAfter = conditions?.getAttribute('NotOnOrAfter') || undefined;
 
+        const attributes = getElements(samlNS, 'Attribute').map((attrEl) => {
+            const name = attrEl.getAttribute('FriendlyName') || attrEl.getAttribute('Name') || '(unnamed)';
+            const valueEls = getElements(samlNS, 'AttributeValue').filter((v) => v.parentElement === attrEl);
+            const values = valueEls.map((v) => v.textContent?.trim() || '').filter(Boolean);
+            return { name, value: values.join(', ') };
+        });
+
         return {
             issuer,
             subject,
             audience,
             destination,
             notBefore,
-            notOnOrAfter
+            notOnOrAfter,
+            attributes
         };
     };
 
@@ -74,57 +97,67 @@ const SamlTools: React.FC = () => {
     const [metaEntityId, setMetaEntityId] = usePersistentState('saml-meta-entity', 'https://sp.example.com');
     const [metaType, setMetaType] = usePersistentState<'sp' | 'idp'>('saml-meta-type', 'sp');
 
-    const handleInspect = () => {
+    const handleInspect = async () => {
         try {
-            let xml = rawXml.trim();
-            // Auto-detect base64
-            if (!xml.startsWith('<') && xml.length > 20) {
-                try {
-                    const decoded = atob(xml);
-                    if (decoded.trim().startsWith('<')) {
-                        xml = decoded;
-                    }
-                } catch (e) { }
-            }
-            // Auto-detect URL decoding
-            if (xml.includes('%3C')) {
-                 try { xml = decodeURIComponent(xml); } catch(e) {}
-            }
-
+            const { xml, detected } = await xmlService.decodeSamlInput(inspectorInput);
+            setDetectedEncoding(detected);
             setPrettyXml(xmlService.formatXml(xml));
             const summary = parseSamlSummary(xml);
             setSamlSummary(summary.error ? null : summary);
         } catch (e) {
+            setDetectedEncoding(null);
             setPrettyXml('Invalid XML or Base64 Input');
             setSamlSummary({ error: 'Invalid XML or Base64 Input' });
         }
     };
 
-    const handleAnalyzeSignature = () => {
+    const handleAnalyzeSignature = async () => {
         try {
-            let xml = rawXml.trim();
-            if (!xml.startsWith('<') && xml.length > 20) {
-                try { xml = atob(xml); } catch (e) { }
-            }
-            
+            const { xml } = await xmlService.decodeSamlInput(sigAnalyzerInput);
+
             const parser = new DOMParser();
             const doc = parser.parseFromString(xml, "text/xml");
-            const signature = doc.getElementsByTagNameNS("http://www.w3.org/2000/09/xmldsig#", "Signature")[0];
-            
-            if (!signature) {
+
+            const parseError = doc.getElementsByTagName("parsererror")[0];
+            if (parseError || doc.documentElement?.nodeName === "parsererror") {
+                setSigAnalysis({ error: "Input could not be parsed as XML — check that it's fully decoded (see Inspector tab)." });
+                return;
+            }
+
+            const DS_NS = "http://www.w3.org/2000/09/xmldsig#";
+            const signatures = Array.from(doc.getElementsByTagNameNS(DS_NS, "Signature"));
+
+            if (signatures.length === 0) {
                 setSigAnalysis({ error: "No <ds:Signature> found in document." });
                 return;
             }
 
-            const getVal = (tag: string) => signature.getElementsByTagNameNS("http://www.w3.org/2000/09/xmldsig#", tag)[0]?.getAttribute("Algorithm") || "Not specified";
-            
-            setSigAnalysis({
-                canonicalization: getVal("CanonicalizationMethod"),
-                signatureMethod: getVal("SignatureMethod"),
-                digestMethod: getVal("DigestMethod"),
-                keyInfo: !!signature.getElementsByTagNameNS("http://www.w3.org/2000/09/xmldsig#", "KeyInfo")[0],
-                found: true
-            });
+            const getVal = (sig: Element, tag: string) =>
+                sig.getElementsByTagNameNS(DS_NS, tag)[0]?.getAttribute("Algorithm") || "Not specified";
+
+            // Walk up from each <ds:Signature> to label it by its nearest
+            // meaningful SAML parent — real IdPs may sign the Assertion only,
+            // the Response only, or both (double-signed).
+            const getContextLabel = (sig: Element): string => {
+                let el: Element | null = sig.parentElement;
+                while (el) {
+                    const localName = el.localName || el.tagName.split(':').pop() || el.tagName;
+                    if (localName === 'Assertion') return 'Assertion';
+                    if (localName === 'Response') return 'Response';
+                    el = el.parentElement;
+                }
+                return 'Unknown context';
+            };
+
+            const results = signatures.map((sig) => ({
+                context: getContextLabel(sig),
+                canonicalization: getVal(sig, "CanonicalizationMethod"),
+                signatureMethod: getVal(sig, "SignatureMethod"),
+                digestMethod: getVal(sig, "DigestMethod"),
+                keyInfo: !!sig.getElementsByTagNameNS(DS_NS, "KeyInfo")[0],
+            }));
+
+            setSigAnalysis({ signatures: results, found: true });
         } catch (e) {
             setSigAnalysis({ error: "Failed to parse XML for signature analysis." });
         }
@@ -135,7 +168,6 @@ const SamlTools: React.FC = () => {
             issuer, subject, audience, acsUrl,
             attributes: { [attrName]: attrVal }
         });
-        setRawXml(xml);
         setPrettyXml(xmlService.formatXml(xml));
         setSamlSummary(parseSamlSummary(xml));
     };
@@ -144,7 +176,6 @@ const SamlTools: React.FC = () => {
         const xml = xmlService.generateMockSamlRequest({
             issuer: reqIssuer, acsUrl: reqAcsUrl, destination: reqDestination
         });
-        setRawXml(xml);
         setPrettyXml(xmlService.formatXml(xml));
         setSamlSummary(parseSamlSummary(xml));
     };
@@ -155,13 +186,12 @@ const SamlTools: React.FC = () => {
             acsUrl: metaType === 'sp' ? reqAcsUrl : undefined,
             ssoUrl: metaType === 'idp' ? reqDestination : undefined
         });
-        setRawXml(xml);
         setPrettyXml(xmlService.formatXml(xml));
         setSamlSummary(parseSamlSummary(xml));
     };
 
     const sendToBase64 = () => {
-        storageService.saveSessionState('base64-input', rawXml);
+        storageService.saveSessionState('base64-input', inspectorInput);
         setCopySuccess(true);
         setTimeout(() => setCopySuccess(false), 2000);
     };
@@ -175,6 +205,10 @@ const SamlTools: React.FC = () => {
             setIssuer('http://www.okta.com/exk1234567890abcdef');
             setSubject('bob.smith@okta.example.com');
             setAudience('https://sp.example.com/sso/saml');
+        } else if (type === 'auth0') {
+            setIssuer('urn:auth0:example-tenant');
+            setSubject('carol.jones@example.com');
+            setAudience('urn:auth0:example-tenant:example-sp');
         }
     };
 
@@ -217,6 +251,28 @@ const SamlTools: React.FC = () => {
                                 <span className="font-mono text-slate-800 break-all">{samlSummary.notOnOrAfter || '—'}</span>
                             </div>
                         </div>
+                        {samlSummary.attributes && samlSummary.attributes.length > 0 && (
+                            <div className="mt-3 pt-3 border-t border-slate-200">
+                                <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-2">Attributes</h4>
+                                <div className="space-y-1.5">
+                                    {samlSummary.attributes.map((attr, idx) => (
+                                        <div key={idx} className="flex items-start justify-between gap-3 group">
+                                            <span className="text-slate-500 shrink-0">{attr.name}</span>
+                                            <div className="flex items-center gap-1.5 min-w-0">
+                                                <span className="font-mono text-slate-800 break-all text-right">{attr.value || '—'}</span>
+                                                <button
+                                                    onClick={() => copyAttrValue(attr.value, idx)}
+                                                    className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0 text-slate-400 hover:text-slate-700"
+                                                    title="Copy value"
+                                                >
+                                                    {copiedAttrIndex === idx ? <CheckIcon className="h-3 w-3 text-green-600" /> : <ClipboardIcon className="h-3 w-3" />}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 )}
             </div>
@@ -237,7 +293,7 @@ const SamlTools: React.FC = () => {
                                     <div className="flex justify-between items-center">
                                         <label className="text-xs font-bold text-slate-500 uppercase">Input (XML / Base64)</label>
                                         <button 
-                                            onClick={() => { setRawXml(''); setPrettyXml(''); setSigAnalysis(null); }}
+                                            onClick={() => { setInspectorInput(''); setPrettyXml(''); setSigAnalysis(null); setDetectedEncoding(null); setSamlSummary(null); }}
                                             className="text-[10px] text-rose-600 hover:text-rose-700 font-bold uppercase tracking-tight flex items-center gap-1"
                                         >
                                             <TrashIcon className="h-3.5 w-3.5" /> Clear
@@ -247,8 +303,8 @@ const SamlTools: React.FC = () => {
                                         rows={8} 
                                         className="block w-full rounded-lg border-slate-200 shadow-sm focus:ring-sky-500 text-xs font-mono" 
                                         placeholder="Paste SAMLResponse, AuthnRequest, or Base64 string..." 
-                                        value={rawXml} 
-                                        onChange={(e) => setRawXml(e.target.value)} 
+                                        value={inspectorInput} 
+                                        onChange={(e) => setInspectorInput(e.target.value)} 
                                     />
                                     <div className="flex gap-2">
                                         <button onClick={handleInspect} className="flex-1 flex items-center justify-center gap-2 py-2 px-4 rounded-lg text-white bg-slate-800 hover:bg-slate-900 font-bold text-sm transition-colors">
@@ -266,7 +322,7 @@ const SamlTools: React.FC = () => {
                                 </div>
                                 <div className="bg-sky-50 p-4 rounded-lg border border-sky-100 text-xs text-sky-800 space-y-2">
                                     <h4 className="font-bold flex items-center gap-1"><BookIcon className="h-3 w-3" /> Quick Tip</h4>
-                                    <p>The inspector automatically detects Base64 encoded SAML (often found in HTTP POST binding) and URL-encoded XML (HTTP Redirect binding).</p>
+                                    <p>The inspector automatically detects Base64-encoded SAML (HTTP-POST binding), and Base64 + DEFLATE-compressed, URL-encoded SAML (HTTP-Redirect binding).</p>
                                 </div>
                             </div>
                         )}
@@ -276,6 +332,7 @@ const SamlTools: React.FC = () => {
                                 <div className="flex gap-2 mb-4">
                                     <button onClick={() => loadExample('google')} className="text-xs py-1 px-2 bg-slate-100 hover:bg-slate-200 rounded text-slate-600 font-medium">Load Google Ex.</button>
                                     <button onClick={() => loadExample('okta')} className="text-xs py-1 px-2 bg-slate-100 hover:bg-slate-200 rounded text-slate-600 font-medium">Load Okta Ex.</button>
+                                    <button onClick={() => loadExample('auth0')} className="text-xs py-1 px-2 bg-slate-100 hover:bg-slate-200 rounded text-slate-600 font-medium">Load Auth0 Ex.</button>
                                 </div>
                                 <div>
                                     <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Issuer (IdP EntityID)</label>
@@ -336,7 +393,7 @@ const SamlTools: React.FC = () => {
                                      <div className="flex justify-between items-center">
                                         <label className="text-xs font-bold text-slate-500 uppercase">Input (XML / Base64)</label>
                                         <button 
-                                            onClick={() => { setRawXml(''); setSigAnalysis(null); }}
+                                            onClick={() => { setSigAnalyzerInput(''); setSigAnalysis(null); }}
                                             className="text-[10px] text-rose-600 hover:text-rose-700 font-bold uppercase tracking-tight flex items-center gap-1"
                                         >
                                             <TrashIcon className="h-3.5 w-3.5" /> Clear
@@ -346,8 +403,8 @@ const SamlTools: React.FC = () => {
                                         rows={8} 
                                         className="block w-full rounded-lg border-slate-200 shadow-sm focus:ring-sky-500 text-xs font-mono" 
                                         placeholder="Paste signed SAML XML..." 
-                                        value={rawXml} 
-                                        onChange={(e) => setRawXml(e.target.value)} 
+                                        value={sigAnalyzerInput} 
+                                        onChange={(e) => setSigAnalyzerInput(e.target.value)} 
                                     />
                                     <button onClick={handleAnalyzeSignature} className="w-full flex items-center justify-center gap-2 py-2 px-4 rounded-lg text-white bg-slate-800 hover:bg-slate-900 font-bold text-sm transition-colors">
                                         <ShieldCheckIcon className="h-4 w-4" /> Analyze Signature
@@ -403,7 +460,11 @@ const SamlTools: React.FC = () => {
                     <div className="bg-slate-900 rounded-xl shadow-lg border border-slate-800 overflow-hidden min-h-[600px] flex flex-col relative group">
                         <div className="bg-slate-800 px-4 py-3 border-b border-slate-700 flex justify-between items-center">
                             <span className="text-[10px] font-mono font-black text-slate-500 tracking-tighter uppercase">XML Output</span>
-                            {/* Actions if needed */}
+                            {activeView === 'Inspector' && detectedEncoding && (
+                                <span className="text-[10px] font-mono font-bold text-cyan-400 tracking-tight">
+                                    Detected: {detectedEncoding}
+                                </span>
+                            )}
                         </div>
                         <div className="p-0 flex-1 overflow-auto bg-[rgba(15,23,42,0.5)]">
                             {activeView === 'Sig Analyzer' && sigAnalysis ? (
@@ -413,23 +474,37 @@ const SamlTools: React.FC = () => {
                                             {sigAnalysis.error}
                                         </div>
                                     ) : (
-                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                            <div className="p-4 bg-slate-800/50 rounded-lg border border-slate-700">
-                                                <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-2">Canonicalization</h4>
-                                                <p className="text-cyan-300 font-mono text-xs">{sigAnalysis.canonicalization}</p>
-                                            </div>
-                                            <div className="p-4 bg-slate-800/50 rounded-lg border border-slate-700">
-                                                <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-2">Signature Method</h4>
-                                                <p className="text-cyan-300 font-mono text-xs">{sigAnalysis.signatureMethod}</p>
-                                            </div>
-                                            <div className="p-4 bg-slate-800/50 rounded-lg border border-slate-700">
-                                                <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-2">Digest Method</h4>
-                                                <p className="text-cyan-300 font-mono text-xs">{sigAnalysis.digestMethod}</p>
-                                            </div>
-                                            <div className="p-4 bg-slate-800/50 rounded-lg border border-slate-700">
-                                                <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-2">KeyInfo</h4>
-                                                <p className={`font-mono text-xs ${sigAnalysis.keyInfo ? 'text-green-400' : 'text-red-400'}`}>{sigAnalysis.keyInfo ? 'Present' : 'Missing'}</p>
-                                            </div>
+                                        <div className="space-y-4">
+                                            {sigAnalysis.signatures.length > 1 && (
+                                                <p className="text-[10px] uppercase font-bold text-amber-400 tracking-tight pl-1">
+                                                    {sigAnalysis.signatures.length} signatures found
+                                                </p>
+                                            )}
+                                            {sigAnalysis.signatures.map((sig: any, idx: number) => (
+                                                <div key={idx} className="border border-slate-700 rounded-lg overflow-hidden">
+                                                    <div className="bg-slate-800/80 px-3 py-2 text-[10px] font-bold uppercase tracking-tight text-slate-300">
+                                                        Signature {idx + 1} — {sig.context}-level
+                                                    </div>
+                                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4">
+                                                        <div className="p-4 bg-slate-800/50 rounded-lg border border-slate-700">
+                                                            <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-2">Canonicalization</h4>
+                                                            <p className="text-cyan-300 font-mono text-xs">{sig.canonicalization}</p>
+                                                        </div>
+                                                        <div className="p-4 bg-slate-800/50 rounded-lg border border-slate-700">
+                                                            <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-2">Signature Method</h4>
+                                                            <p className="text-cyan-300 font-mono text-xs">{sig.signatureMethod}</p>
+                                                        </div>
+                                                        <div className="p-4 bg-slate-800/50 rounded-lg border border-slate-700">
+                                                            <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-2">Digest Method</h4>
+                                                            <p className="text-cyan-300 font-mono text-xs">{sig.digestMethod}</p>
+                                                        </div>
+                                                        <div className="p-4 bg-slate-800/50 rounded-lg border border-slate-700">
+                                                            <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-2">KeyInfo</h4>
+                                                            <p className={`font-mono text-xs ${sig.keyInfo ? 'text-green-400' : 'text-red-400'}`}>{sig.keyInfo ? 'Present' : 'Missing'}</p>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))}
                                         </div>
                                     )}
                                      {prettyXml && (

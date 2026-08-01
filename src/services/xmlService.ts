@@ -1,5 +1,90 @@
 
 export const xmlService = {
+  /**
+   * Decodes SAML input trying, in order: raw XML -> base64 -> base64 + DEFLATE
+   * (HTTP-Redirect binding) -> URL-decode + base64 [+ DEFLATE]. Returns the
+   * decoded XML string along with a human-readable label of which path
+   * succeeded, so callers can surface it to the user (e.g. "Detected: Base64
+   * + DEFLATE (Redirect binding)"). If nothing decodes successfully, the
+   * original trimmed input is returned unmodified so downstream XML parsing
+   * can surface an accurate parse error.
+   */
+  async decodeSamlInput(raw: string): Promise<{ xml: string; detected: string }> {
+    const input = raw.trim();
+
+    if (input.startsWith('<')) {
+      return { xml: input, detected: 'Raw XML' };
+    }
+
+    const base64ToBytes = (b64: string): Uint8Array | null => {
+      try {
+        const clean = b64.replace(/\s/g, '');
+        const bin = atob(clean);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return bytes;
+      } catch (e) {
+        return null;
+      }
+    };
+
+    const inflate = async (bytes: Uint8Array): Promise<string | null> => {
+      if (typeof DecompressionStream === 'undefined') return null;
+      try {
+        const ds = new DecompressionStream('deflate-raw');
+        const stream = new Blob([bytes]).stream().pipeThrough(ds);
+        const buf = await new Response(stream).arrayBuffer();
+        return new TextDecoder().decode(buf);
+      } catch (e) {
+        return null;
+      }
+    };
+
+    // 1. Plain base64 (HTTP-POST binding, or a bare base64 string)
+    const rawBytes = base64ToBytes(input);
+    if (rawBytes) {
+      const asText = new TextDecoder().decode(rawBytes);
+      if (asText.trim().startsWith('<')) {
+        return { xml: asText, detected: 'Base64' };
+      }
+
+      // 2. Base64 + DEFLATE, no URL-encoding wrapper (Redirect binding)
+      const inflated = await inflate(rawBytes);
+      if (inflated && inflated.trim().startsWith('<')) {
+        return { xml: inflated, detected: 'Base64 + DEFLATE (Redirect binding)' };
+      }
+    }
+
+    // 3. URL-decode first, then retry raw / base64 / base64+DEFLATE
+    //    (covers Redirect-binding messages passed as a full query-string value)
+    if (/%[0-9A-Fa-f]{2}/.test(input)) {
+      try {
+        const urlDecoded = decodeURIComponent(input);
+
+        if (urlDecoded.trim().startsWith('<')) {
+          return { xml: urlDecoded, detected: 'URL-decoded XML' };
+        }
+
+        const urlBytes = base64ToBytes(urlDecoded);
+        if (urlBytes) {
+          const asText = new TextDecoder().decode(urlBytes);
+          if (asText.trim().startsWith('<')) {
+            return { xml: asText, detected: 'URL-decoded + Base64' };
+          }
+
+          const inflated = await inflate(urlBytes);
+          if (inflated && inflated.trim().startsWith('<')) {
+            return { xml: inflated, detected: 'URL-decoded + Base64 + DEFLATE (Redirect binding)' };
+          }
+        }
+      } catch (e) {
+        // not valid percent-encoding — fall through
+      }
+    }
+
+    return { xml: input, detected: 'Unrecognized (passed through unmodified)' };
+  },
+
   formatXml(xml: string): string {
     const tab = '  ';
     const normalized = xml.replace(/\r\n/g, '\n').trim();
