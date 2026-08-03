@@ -10,6 +10,10 @@
 //   - Chunk 3: SAML correlation via RelayState/timestamp, using
 //     xmlService.parseSamlResponse() for real Issuer/NameID/Attribute
 //     extraction. Done.
+//   - Real-HAR validation pass: flows now reconstruct the FULL real
+//     transcript (every entry between the auth-service launch and the
+//     session being established), not just a fixed 3-4 step summary.
+//     See findFlowStartEntry / findSessionEstablishedEntry / buildStepTimeline.
 //   - detectFlows() is async because SAML decoding may require inflating a
 //     DEFLATE-compressed redirect-binding payload (xmlService.decodeSamlInput
 //     uses the async DecompressionStream API). Callers must await it.
@@ -23,6 +27,13 @@ import { xmlService } from './xmlService';
 // ---------------------------------------------------------------------------
 
 export type FlowKind = 'oauth-oidc' | 'saml' | 'device';
+
+/** Which of the 3 diagram nodes a step's request effectively touches. Every
+ * captured entry is fundamentally a browser request, so it's always framed
+ * as `user -> client` (hit Pega) or `user -> auth` (hit the IdP). The one
+ * exception is the synthetic, never-captured backend token exchange, which
+ * is the sole `client -> auth` edge we ever show. */
+export type FlowNode = 'user' | 'client' | 'auth';
 
 export interface RealFlowStep {
   title: string;
@@ -40,6 +51,23 @@ export interface RealFlowStep {
   };
   /** false = we know this step happened but didn't see it in the HAR (e.g. server-side token exchange) */
   captured: boolean;
+  nodeFrom: FlowNode;
+  nodeTo: FlowNode;
+}
+
+/** A single HAR entry that contributed to a reconstructed flow, enriched with
+ * enough context (its position in the original capture, method/url/status)
+ * for the UI to show something more useful than a bare opaque id. */
+export interface SourceHarRequestRef {
+  id: string;
+  /** 1-based position of this request within the FULL original HAR capture
+   * (har.log.entries), so the UI can show e.g. "Request #47 of 312" and the
+   * count always matches what's actually in the uploaded file. */
+  index: number;
+  method: string;
+  url: string;
+  status: number;
+  startedAt: string;
 }
 
 export interface DetectedFlow {
@@ -51,7 +79,9 @@ export interface DetectedFlow {
   idpDisplayName: string; // "Okta" / "Microsoft" / raw hostname if unrecognized
   issuer?: string; // from JWT `iss` or SAML <Issuer>
   steps: RealFlowStep[];
-  sourceEntryIds: string[];
+  sourceEntries: SourceHarRequestRef[];
+  /** Total number of requests in the full uploaded HAR (not just this flow's window) — for "N of TOTAL" display. */
+  totalHarEntries: number;
   startedAt: string;
 }
 
@@ -61,12 +91,11 @@ export interface DetectedFlow {
 
 // Kept in sync with HarAnalyzer.tsx's PEGA_COOKIES list. Duplicated here
 // (rather than imported) because HarAnalyzer.tsx doesn't currently export
-// it — worth revisiting in Chunk 2 if we want a single shared source.
+// it — worth revisiting if we want a single shared source.
 const PEGA_COOKIES = ['Pega-AAT', 'Pega-Perf', 'Pega-RULES', 'Pega-ThreadName', 'Pega-UI-SessId'];
 
-// Common Pega auth-service path fragments. The exact ACS/callback path can
-// vary by deployment (see Open Questions in the enhancement doc) so this is
-// intentionally a loose fragment match rather than an exact route match.
+// Common Pega auth-service path fragments. Confirmed against real captures:
+// OAuth callbacks land on /PRAuth, SAML ACS is /PRRestService/WebSSO/SAML/v2/...
 const PEGA_URL_FRAGMENTS = ['/prweb/', 'prauth', 'prrestservice', 'prservlet'];
 
 function getCookieHeaderValue(headers: HarHeader[]): string {
@@ -104,6 +133,14 @@ function getHost(url: string): string {
   }
 }
 
+function getPathname(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
+}
+
 /**
  * Finds the Pega host for this HAR by scanning for the first entry that
  * looks like Pega (cookie or URL match). Returns null if no Pega entries
@@ -113,6 +150,244 @@ function getHost(url: string): string {
 function findPegaHost(entries: HarEntry[]): string | null {
   const pegaEntry = entries.find(isPegaEntry);
   return pegaEntry ? getHost(pegaEntry.request.url) : null;
+}
+
+/**
+ * True if a request carries a Pega-AAT cookie — the marker that the
+ * authenticated app session has been established. Checked on the REQUEST
+ * (not response Set-Cookie), since we want the first hit where the browser
+ * is presenting an already-issued AAT, confirmed against real captures.
+ */
+function hasPegaAatRequestCookie(entry: HarEntry): boolean {
+  if (entry.request.cookies.some(c => c.name.toLowerCase().includes('pega-aat'))) return true;
+  return getCookieHeaderValue(entry.request.headers).toLowerCase().includes('pega-aat');
+}
+
+function isStandardThreadPath(pathname: string): boolean {
+  return /!standard/i.test(pathname) || /%21standard/i.test(pathname);
+}
+
+/**
+ * Finds the entry that actually kicks off this login: the hit to Pega's
+ * PRAuth servlet that names the auth service, e.g.
+ * /PRAuth/app/<appName>/Auth0_OIDC/ or /PRAuth/app/default/<AuthService>/.
+ * Identified by: last path segment isn't a thread ID (doesn't end in '*',
+ * per real Pega thread-ID shape) and isn't a !STANDARD hit. Picks the
+ * closest such entry before `beforeEntry` so multiple flows/re-auths within
+ * one HAR each get their own correct launch entry.
+ */
+function findFlowStartEntry(entries: HarEntry[], pegaHost: string, beforeEntry: HarEntry): HarEntry | null {
+  const beforeTime = new Date(beforeEntry.startedDateTime).getTime();
+  const candidates = entries.filter(e => {
+    if (getHost(e.request.url) !== pegaHost) return false;
+    if (new Date(e.startedDateTime).getTime() > beforeTime) return false;
+    const pathname = getPathname(e.request.url);
+    if (!/\/prauth\//i.test(pathname)) return false;
+    if (isStandardThreadPath(pathname)) return false;
+    const segments = pathname.split('/').filter(Boolean);
+    const last = segments[segments.length - 1] || '';
+    if (last.endsWith('*')) return false; // thread-ID segment, not an auth service name
+    return true;
+  });
+  if (candidates.length === 0) return null;
+  return candidates.reduce((latest, e) =>
+    new Date(e.startedDateTime).getTime() > new Date(latest.startedDateTime).getTime() ? e : latest
+  );
+}
+
+/**
+ * Finds the first !STANDARD hit (after `afterEntry`) that carries a
+ * Pega-AAT cookie on the request — i.e. the moment the authenticated app
+ * session is confirmed established, per real-capture validation.
+ */
+function findSessionEstablishedEntry(entries: HarEntry[], pegaHost: string, afterEntry: HarEntry): HarEntry | null {
+  const afterTime = new Date(afterEntry.startedDateTime).getTime();
+  const candidates = entries.filter(e => {
+    if (getHost(e.request.url) !== pegaHost) return false;
+    if (new Date(e.startedDateTime).getTime() < afterTime) return false;
+    if (!isStandardThreadPath(getPathname(e.request.url))) return false;
+    return hasPegaAatRequestCookie(e);
+  });
+  if (candidates.length === 0) return null;
+  return candidates.reduce((earliest, e) =>
+    new Date(e.startedDateTime).getTime() < new Date(earliest.startedDateTime).getTime() ? e : earliest
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Step timeline construction (shared by OAuth and SAML)
+// ---------------------------------------------------------------------------
+
+function extractLastPathSegment(url: string): string {
+  const segments = getPathname(url).split('/').filter(Boolean);
+  return segments[segments.length - 1] || '';
+}
+
+function humanizeIdpSegment(url: string): string {
+  const pathname = getPathname(url).toLowerCase();
+  if (pathname.includes('/samlp/')) return 'SAML Request';
+  const last = extractLastPathSegment(url).toLowerCase();
+  if (last === 'resume') return 'Resume';
+  if (last === 'login') return 'Login';
+  if (last === 'authorize') return 'Authorize';
+  return last ? last.charAt(0).toUpperCase() + last.slice(1) : 'Request';
+}
+
+/** Builds a SourceHarRequestRef for `entry`, resolving its 1-based position
+ * within `allEntries` (the full original capture) so the UI can display a
+ * request's real place in the uploaded HAR, not just an opaque id. */
+function toSourceRef(entry: HarEntry, allEntries: HarEntry[]): SourceHarRequestRef {
+  return {
+    id: entry._id || '',
+    index: allEntries.indexOf(entry) + 1,
+    method: entry.request.method,
+    url: entry.request.url,
+    status: entry.response.status,
+    startedAt: entry.startedDateTime,
+  };
+}
+
+function buildFlowStep(
+  title: string,
+  description: string,
+  entry: HarEntry | null,
+  captured: boolean,
+  nodeFrom: FlowNode,
+  nodeTo: FlowNode
+): RealFlowStep {
+  if (!entry) {
+    return { title, description, captured, nodeFrom, nodeTo };
+  }
+  return {
+    title,
+    description,
+    captured,
+    nodeFrom,
+    nodeTo,
+    request: {
+      method: entry.request.method,
+      url: entry.request.url,
+      headers: entry.request.headers,
+      body: entry.request.postData?.text,
+    },
+    response: {
+      status: entry.response.status,
+      headers: entry.response.headers,
+      body: entry.response.content.text,
+    },
+  };
+}
+
+function describeStep(
+  entry: HarEntry,
+  ctx: { pegaHost: string; isFirst: boolean; isLast: boolean; isCallback: boolean; flowKind: FlowKind }
+): { title: string; description: string } {
+  const host = getHost(entry.request.url);
+  const onPega = host === ctx.pegaHost;
+  const kindLabel = ctx.flowKind === 'saml' ? 'SAML' : 'OIDC/OAuth2';
+
+  // isCallback is checked first: in the rare case where a flow's start and
+  // end both collapse onto the same anchor entry (e.g. a SAML flow whose
+  // initial redirect wasn't captured, so the ACS POST is the only entry in
+  // range), "Return to Pega (SP)" is the most accurate label for it.
+  if (ctx.isCallback) {
+    return {
+      title: 'Return to Pega (SP)',
+      description: `The IdP delivered the ${ctx.flowKind === 'saml' ? 'SAMLResponse' : 'authorization code'} back to Pega.`,
+    };
+  }
+  if (ctx.isFirst) {
+    const authServiceName = extractLastPathSegment(entry.request.url) || 'the configured auth service';
+    return {
+      title: 'Auth Service Launch',
+      description: `Pega launched the "${authServiceName}" auth service, beginning ${kindLabel} authentication.`,
+    };
+  }
+  if (ctx.isLast) {
+    return {
+      title: 'Session Established',
+      description: 'This request carried the Pega-AAT session cookie — sign-in completed and the authenticated app loaded.',
+    };
+  }
+  if (!onPega) {
+    return {
+      title: `IdP: ${humanizeIdpSegment(entry.request.url)}`,
+      description: `${entry.request.method} request to ${host}.`,
+    };
+  }
+  return {
+    title: 'Pega Internal Redirect',
+    description: `Pega processed an internal redirect/session hop (${entry.request.method} \u2192 HTTP ${entry.response.status}).`,
+  };
+}
+
+interface StepTimelineContext {
+  pegaHost: string;
+  idpHost: string;
+  flowKind: FlowKind;
+  flowStartEntry: HarEntry | null;
+  terminalEntry: HarEntry | null;
+  callbackEntry: HarEntry; // the "code/SAMLResponse delivered to Pega" anchor
+  fallbackStartEntry: HarEntry; // used when flowStartEntry couldn't be found
+}
+
+/**
+ * Builds the full step-by-step timeline: every entry between the flow's
+ * start and the session being established (inclusive), restricted to the
+ * Pega and IdP hosts so unrelated third-party noise (analytics, CDN, etc.)
+ * captured in the same window doesn't get pulled in as if it were part of
+ * the login. Falls back gracefully to just the callback/response anchor
+ * when the launch or session-established entries can't be located (e.g. a
+ * trimmed HAR that doesn't include them).
+ */
+function buildStepTimeline(entries: HarEntry[], ctx: StepTimelineContext): { steps: RealFlowStep[]; sourceEntries: SourceHarRequestRef[] } {
+  const rangeStart = ctx.flowStartEntry || ctx.fallbackStartEntry;
+  const rangeEnd = ctx.terminalEntry || ctx.callbackEntry;
+
+  const startTime = new Date(rangeStart.startedDateTime).getTime();
+  const endTime = new Date(rangeEnd.startedDateTime).getTime();
+  const relevantHosts = new Set([ctx.pegaHost, ctx.idpHost]);
+
+  const windowEntries = entries
+    .filter(e => {
+      const t = new Date(e.startedDateTime).getTime();
+      if (t < startTime || t > endTime) return false;
+      return relevantHosts.has(getHost(e.request.url));
+    })
+    .sort((a, b) => new Date(a.startedDateTime).getTime() - new Date(b.startedDateTime).getTime());
+
+  const steps: RealFlowStep[] = windowEntries.map(entry => {
+    const isFirst = entry === rangeStart;
+    const isLast = entry === rangeEnd;
+    const isCallback = entry === ctx.callbackEntry;
+    const { title, description } = describeStep(entry, {
+      pegaHost: ctx.pegaHost,
+      isFirst,
+      isLast,
+      isCallback,
+      flowKind: ctx.flowKind,
+    });
+    const onPega = getHost(entry.request.url) === ctx.pegaHost;
+    return buildFlowStep(title, description, entry, true, 'user', onPega ? 'client' : 'auth');
+  });
+
+  if (ctx.flowKind === 'oauth-oidc') {
+    steps.push(
+      buildFlowStep(
+        'Token Exchange',
+        'Pega exchanged the authorization code for tokens via a server-to-server call. Not visible in a browser-captured HAR.',
+        null,
+        false,
+        'client',
+        'auth'
+      )
+    );
+  }
+
+  const sourceEntries: SourceHarRequestRef[] = windowEntries
+    .filter(e => !!e._id)
+    .map(e => toSourceRef(e, entries));
+  return { steps, sourceEntries };
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +429,24 @@ function findOAuthCandidates(entries: HarEntry[], pegaHost: string): OAuthCandid
     );
   });
 
-  for (const callbackEntry of callbacks) {
+  // Pega's PRAuth servlet commonly 307/303-redirects the browser through
+  // several internal URL-normalization hops after the code comes back
+  // (e.g. /PRAuth -> /PRAuth/app/<name>/ -> .../<thread>*/!STANDARD),
+  // and it re-appends the *same* code/state to every hop's URL. Only the
+  // first hit is the real "code arrived at the SP" event — grouping by
+  // state and keeping the earliest avoids emitting one duplicate
+  // DetectedFlow per redirect hop for what is actually a single login.
+  const earliestCallbackByState = new Map<string, HarEntry>();
+  for (const entry of callbacks) {
+    const state = getQueryParam(entry.request.url, 'state');
+    if (!state) continue;
+    const existing = earliestCallbackByState.get(state);
+    if (!existing || new Date(entry.startedDateTime).getTime() < new Date(existing.startedDateTime).getTime()) {
+      earliestCallbackByState.set(state, entry);
+    }
+  }
+
+  for (const callbackEntry of earliestCallbackByState.values()) {
     const state = getQueryParam(callbackEntry.request.url, 'state');
     if (!state) continue;
 
@@ -180,14 +472,15 @@ function findOAuthCandidates(entries: HarEntry[], pegaHost: string): OAuthCandid
   return candidates;
 }
 
-// Cosmetic-only fingerprint table (Chunk 6 will expand this). No match
-// falls through to showing the raw hostname, per the enhancement doc —
-// branding is decoration, not a dependency for correctness.
+// Cosmetic-only fingerprint table. No match falls through to showing the
+// raw hostname, per the enhancement doc — branding is decoration, not a
+// dependency for correctness.
 const IDP_FINGERPRINTS: Array<{ pattern: RegExp; name: string }> = [
   { pattern: /\.okta\.com$/i, name: 'Okta' },
   { pattern: /\.oktapreview\.com$/i, name: 'Okta' },
   { pattern: /login\.microsoftonline\.com$/i, name: 'Microsoft Entra' },
   { pattern: /\.microsoftonline\.com$/i, name: 'Microsoft Entra' },
+  { pattern: /\.auth0\.com$/i, name: 'Auth0' },
 ];
 
 function getIdpDisplayName(host: string): string {
@@ -195,34 +488,7 @@ function getIdpDisplayName(host: string): string {
   return match ? match.name : host;
 }
 
-function buildFlowStep(
-  title: string,
-  description: string,
-  entry: HarEntry | null,
-  captured: boolean
-): RealFlowStep {
-  if (!entry) {
-    return { title, description, captured };
-  }
-  return {
-    title,
-    description,
-    request: {
-      method: entry.request.method,
-      url: entry.request.url,
-      headers: entry.request.headers,
-      body: entry.request.postData?.text,
-    },
-    response: {
-      status: entry.response.status,
-      headers: entry.response.headers,
-      body: entry.response.content.text,
-    },
-    captured,
-  };
-}
-
-function buildOAuthFlow(candidate: OAuthCandidate, pegaHost: string): DetectedFlow {
+function buildOAuthFlow(candidate: OAuthCandidate, pegaHost: string, allEntries: HarEntry[]): DetectedFlow {
   const { authorizeEntry, callbackEntry, state } = candidate;
   const idpHost = getHost(authorizeEntry.request.url);
 
@@ -238,44 +504,33 @@ function buildOAuthFlow(candidate: OAuthCandidate, pegaHost: string): DetectedFl
     issuer = decoded?.payload.iss;
   }
 
-  const steps: RealFlowStep[] = [
-    buildFlowStep(
-      'Redirect to IdP',
-      `Pega redirected the browser to ${idpHost} to begin authentication.`,
-      authorizeEntry,
-      true
-    ),
-    buildFlowStep(
-      'Authentication at IdP',
-      `The user authenticated at ${idpHost}. Credential entry is not visible in the HAR.`,
-      null,
-      false
-    ),
-    buildFlowStep(
-      'Callback to Pega (SP)',
-      `The IdP redirected back to Pega with an authorization code (state matched: ${state}).`,
-      callbackEntry,
-      true
-    ),
-    buildFlowStep(
-      'Token Exchange',
-      'Pega exchanged the authorization code for tokens via a server-to-server call. Not visible in a browser-captured HAR.',
-      null,
-      false
-    ),
-  ];
+  const flowStartEntry = findFlowStartEntry(allEntries, pegaHost, authorizeEntry);
+  const terminalEntry = findSessionEstablishedEntry(allEntries, pegaHost, callbackEntry);
+
+  const { steps, sourceEntries } = buildStepTimeline(allEntries, {
+    pegaHost,
+    idpHost,
+    flowKind: 'oauth-oidc',
+    flowStartEntry,
+    terminalEntry,
+    callbackEntry,
+    fallbackStartEntry: authorizeEntry,
+  });
 
   return {
     id: `oauth-${callbackEntry._id || callbackEntry.startedDateTime}`,
     kind: 'oauth-oidc',
-    confidence: 'high',
+    confidence: terminalEntry ? 'high' : 'medium',
     spHost: pegaHost,
     idpHost,
     idpDisplayName: getIdpDisplayName(idpHost),
     issuer,
     steps,
-    sourceEntryIds: [authorizeEntry._id, callbackEntry._id].filter(Boolean) as string[],
-    startedAt: authorizeEntry.startedDateTime,
+    sourceEntries: sourceEntries.length > 0
+      ? sourceEntries
+      : [authorizeEntry, callbackEntry].filter(e => !!e._id).map(e => toSourceRef(e, allEntries)),
+    totalHarEntries: allEntries.length,
+    startedAt: (flowStartEntry || authorizeEntry).startedDateTime,
   };
 }
 
@@ -361,7 +616,7 @@ function findSamlCandidates(entries: HarEntry[], pegaHost: string): SamlCandidat
   });
 }
 
-async function buildSamlFlow(candidate: SamlCandidate, pegaHost: string): Promise<DetectedFlow> {
+async function buildSamlFlow(candidate: SamlCandidate, pegaHost: string, allEntries: HarEntry[]): Promise<DetectedFlow> {
   const { requestEntry, responseEntry, relayState } = candidate;
 
   const samlResponseRaw = getSamlParamFromEntry(responseEntry, 'SAMLResponse');
@@ -386,44 +641,69 @@ async function buildSamlFlow(candidate: SamlCandidate, pegaHost: string): Promis
     ? safeHostFromIssuer(parsedResponse.issuer)
     : 'unknown-idp';
 
-  const statusLabel = parsedResponse?.statusCode?.split(':').pop();
+  const flowStartEntry = requestEntry ? findFlowStartEntry(allEntries, pegaHost, requestEntry) : null;
+  const terminalEntry = findSessionEstablishedEntry(allEntries, pegaHost, responseEntry);
 
-  const steps: RealFlowStep[] = [
-    buildFlowStep(
-      'Redirect to IdP',
-      requestEntry
-        ? `Pega redirected the browser to ${idpHost} with a SAMLRequest${relayState ? ` (RelayState matched: ${relayState})` : ' (correlated by timestamp)'}.`
-        : `The initial redirect to ${idpHost} was not captured in this HAR.`,
-      requestEntry,
-      !!requestEntry
-    ),
-    buildFlowStep(
-      'Authentication at IdP',
-      `The user authenticated at ${idpHost}. Credential entry is not visible in the HAR.`,
-      null,
-      false
-    ),
-    buildFlowStep(
-      'POST to SP (ACS)',
-      parsedResponse
-        ? `The browser POSTed a signed SAMLResponse to Pega's Assertion Consumer Service${statusLabel ? ` (status: ${statusLabel})` : ''}${parsedResponse.nameId ? `, asserting NameID "${parsedResponse.nameId}"` : ''}.`
-        : "The browser POSTed a SAMLResponse to Pega's Assertion Consumer Service, but it could not be decoded/parsed.",
-      responseEntry,
-      true
-    ),
-  ];
+  const { steps, sourceEntries } = buildStepTimeline(allEntries, {
+    pegaHost,
+    idpHost,
+    flowKind: 'saml',
+    flowStartEntry,
+    terminalEntry,
+    callbackEntry: responseEntry,
+    fallbackStartEntry: requestEntry || responseEntry,
+  });
+
+  // If the initial redirect to the IdP wasn't captured, prepend two
+  // synthetic (uncaptured) steps for continuity, same as the OAuth flow's
+  // uncaptured "Token Exchange" step — flagging that these things happened
+  // even though the HAR doesn't show them.
+  if (!requestEntry) {
+    steps.unshift(
+      buildFlowStep(
+        'Redirect to IdP',
+        `The initial redirect to ${idpHost} was not captured in this HAR.`,
+        null,
+        false,
+        'client',
+        'auth'
+      ),
+      buildFlowStep(
+        'Authentication at IdP',
+        `The user authenticated at ${idpHost}. Credential entry is not visible in the HAR.`,
+        null,
+        false,
+        'user',
+        'auth'
+      )
+    );
+  }
+
+  const statusLabel = parsedResponse?.statusCode?.split(':').pop();
+  // Enrich the "Return to Pega (SP)" step's description with parsed SAML
+  // details now that we have them (buildStepTimeline doesn't have access
+  // to the parsed assertion, only the raw entry).
+  const callbackStep = steps.find(s => s.title === 'Return to Pega (SP)');
+  if (callbackStep && parsedResponse) {
+    callbackStep.description = `The IdP delivered a signed SAMLResponse to Pega's ACS${statusLabel ? ` (status: ${statusLabel})` : ''}${relayState ? ` (RelayState matched: ${relayState})` : ''}${parsedResponse.nameId ? `, asserting NameID "${parsedResponse.nameId}"` : ''}.`;
+  } else if (callbackStep && !parsedResponse) {
+    callbackStep.description = "The IdP delivered a SAMLResponse to Pega's ACS, but it could not be decoded/parsed.";
+  }
 
   return {
     id: `saml-${responseEntry._id || responseEntry.startedDateTime}`,
     kind: 'saml',
-    confidence: requestEntry ? 'high' : 'medium',
+    confidence: requestEntry && terminalEntry ? 'high' : 'medium',
     spHost: pegaHost,
     idpHost,
     idpDisplayName: getIdpDisplayName(idpHost),
     issuer: parsedResponse?.issuer || requestIssuer,
     steps,
-    sourceEntryIds: [requestEntry?._id, responseEntry._id].filter(Boolean) as string[],
-    startedAt: (requestEntry || responseEntry).startedDateTime,
+    sourceEntries: sourceEntries.length > 0
+      ? sourceEntries
+      : [requestEntry, responseEntry].filter((e): e is HarEntry => !!e && !!e._id).map(e => toSourceRef(e, allEntries)),
+    totalHarEntries: allEntries.length,
+    startedAt: (flowStartEntry || requestEntry || responseEntry).startedDateTime,
   };
 }
 
@@ -434,13 +714,17 @@ async function buildSamlFlow(candidate: SamlCandidate, pegaHost: string): Promis
 /**
  * Detects reconstructable SSO flows in a parsed HAR.
  *
- * Chunk 1 scope: OAuth2/OIDC flows are fully reconstructed. SAML entries
- * are recognized (so the caller can show a "SAML detected, full
- * reconstruction coming soon" affordance if desired) but are not yet
- * returned as DetectedFlow objects — that lands in Chunk 3/4 once
- * xmlService.parseSamlResponse() exists.
+ * OAuth2/OIDC flows are correlated via `state`. SAML flows are correlated
+ * via RelayState (falling back to nearest-preceding-request by timestamp)
+ * and fully parsed for Issuer/NameID/status via xmlService.parseSamlResponse().
+ * Each flow's steps span the full real transcript: from the Pega auth-service
+ * launch entry through every redirect/IdP call to the first request that
+ * carries the Pega-AAT session cookie.
+ *
+ * Async: SAML's Redirect-binding payloads may be DEFLATE-compressed, which
+ * requires the async DecompressionStream API to decode. Callers must await.
  */
-export function detectFlows(har: HarRoot): DetectedFlow[] {
+export async function detectFlows(har: HarRoot): Promise<DetectedFlow[]> {
   const entries = har.log?.entries || [];
   if (entries.length === 0) return [];
 
@@ -451,7 +735,18 @@ export function detectFlows(har: HarRoot): DetectedFlow[] {
 
   const oauthCandidates = findOAuthCandidates(entries, pegaHost);
   for (const candidate of oauthCandidates) {
-    flows.push(buildOAuthFlow(candidate, pegaHost));
+    flows.push(buildOAuthFlow(candidate, pegaHost, entries));
+  }
+
+  const samlCandidates = findSamlCandidates(entries, pegaHost);
+  for (const candidate of samlCandidates) {
+    try {
+      flows.push(await buildSamlFlow(candidate, pegaHost, entries));
+    } catch {
+      // Skip SAML payloads that fail to decode/parse entirely (e.g. a
+      // corrupted capture) rather than surfacing a broken flow card.
+      // hasUnreconstructedSamlTraffic() still flags that SAML was present.
+    }
   }
 
   // Sort chronologically so a HAR with multiple flows (e.g. login + later
@@ -462,8 +757,10 @@ export function detectFlows(har: HarRoot): DetectedFlow[] {
 }
 
 /**
- * Convenience helper for Chunk 2's UI: true if the HAR contains SAML
- * traffic that detectFlows() can't fully reconstruct yet in this chunk.
+ * True if the HAR contains SAML-shaped traffic at all (SAMLRequest/
+ * SAMLResponse params seen anywhere). Used by the UI to show a note when
+ * SAML entries exist but didn't produce a matching DetectedFlow — e.g. a
+ * SAMLResponse landed outside the Pega host, or a payload failed to parse.
  */
 export function hasUnreconstructedSamlTraffic(har: HarRoot): boolean {
   const entries = har.log?.entries || [];

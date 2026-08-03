@@ -15,12 +15,15 @@ interface JwtDecoderProps {
 const JwtDecoder: React.FC<JwtDecoderProps> = ({ initialData, onDataHandled }) => {
   const [token, setToken] = useState('');
   const [key, setKey] = useState('your-256-bit-secret');
+  const [keyMode, setKeyMode] = useState<'pem' | 'jwks'>('pem');
   const [audience, setAudience] = useState('');
   const [issuer, setIssuer] = useState('');
   const [decoded, setDecoded] = useState<DecodedJwt | null>(null);
   const [verification, setVerification] = useState<VerificationResult | null>(null);
   const [showSecret, setShowSecret] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
+
+  const isJwksUrl = (value: string) => /^https?:\/\//i.test(value.trim());
 
   // Load state from IndexedDB
   useEffect(() => {
@@ -30,6 +33,7 @@ const JwtDecoder: React.FC<JwtDecoderProps> = ({ initialData, onDataHandled }) =
         if (savedState) {
           setToken(savedState.token);
           setKey(savedState.key);
+          setKeyMode(isJwksUrl(savedState.key) ? 'jwks' : 'pem');
           setAudience(savedState.audience);
           setIssuer(savedState.issuer);
         }
@@ -52,7 +56,9 @@ const JwtDecoder: React.FC<JwtDecoderProps> = ({ initialData, onDataHandled }) =
   useEffect(() => {
     if (initialData && isLoaded) {
       setToken(initialData.token || '');
-      setKey(initialData.key || 'your-256-bit-secret');
+      const nextKey = initialData.key || 'your-256-bit-secret';
+      setKey(nextKey);
+      setKeyMode(isJwksUrl(nextKey) ? 'jwks' : 'pem');
       setAudience(initialData.audience || '');
       setIssuer(initialData.issuer || '');
       onDataHandled();
@@ -132,16 +138,52 @@ const JwtDecoder: React.FC<JwtDecoderProps> = ({ initialData, onDataHandled }) =
                 <div>
                     <div className="flex justify-between items-center mb-1">
                         <label htmlFor="jwt-verify-key" className="block text-sm font-medium text-slate-700">
-                            {isAsymmetric ? 'Public Key (PEM)' : 'HMAC Secret'}
+                            {!isAsymmetric ? 'HMAC Secret' : (keyMode === 'jwks' ? 'JWKS URL' : 'Public Key (PEM)')}
                         </label>
-                        <button 
-                            onClick={() => setShowSecret(!showSecret)}
-                            className="text-xs text-sky-600 hover:text-sky-700 font-medium"
-                        >
-                            {showSecret ? 'Hide' : 'Show'}
-                        </button>
+                        <div className="flex items-center gap-3">
+                            {isAsymmetric && (
+                                <div className="flex items-center bg-slate-100 rounded-full p-0.5 text-[10px] font-bold">
+                                    <button
+                                        type="button"
+                                        onClick={() => { if (keyMode !== 'pem') { setKeyMode('pem'); setKey(''); } }}
+                                        className={`px-2 py-0.5 rounded-full transition-colors ${keyMode === 'pem' ? 'bg-white text-sky-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                                    >
+                                        PEM
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => { if (keyMode !== 'jwks') { setKeyMode('jwks'); setKey(''); } }}
+                                        className={`px-2 py-0.5 rounded-full transition-colors ${keyMode === 'jwks' ? 'bg-white text-sky-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                                    >
+                                        JWKS URL
+                                    </button>
+                                </div>
+                            )}
+                            {!(isAsymmetric && keyMode === 'jwks') && (
+                                <button 
+                                    onClick={() => setShowSecret(!showSecret)}
+                                    className="text-xs text-sky-600 hover:text-sky-700 font-medium"
+                                >
+                                    {showSecret ? 'Hide' : 'Show'}
+                                </button>
+                            )}
+                        </div>
                     </div>
-                    {isAsymmetric ? (
+                    {isAsymmetric && keyMode === 'jwks' ? (
+                        <>
+                            <input
+                                id="jwt-verify-key"
+                                type="text"
+                                className="block w-full rounded-lg border-slate-300 shadow-sm focus:border-sky-500 focus:ring-sky-500 text-sm font-mono"
+                                placeholder="https://your-idp.com/.well-known/jwks.json"
+                                value={key}
+                                onChange={(e) => setKey(e.target.value)}
+                            />
+                            <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                                Fetched at verify-time and matched against the token's <code className="font-mono">kid</code> header — no need to paste a public key by hand. This should point at the JWKS document itself (e.g. Auth0's <code className="font-mono">/.well-known/jwks.json</code>), not an issuer or discovery URL.
+                            </p>
+                        </>
+                    ) : isAsymmetric ? (
                         <textarea
                         id="jwt-verify-key"
                         className={`block w-full rounded-lg border-slate-300 shadow-sm focus:border-sky-500 focus:ring-sky-500 text-xs font-mono bg-slate-50 ${!showSecret ? 'text-transparent tracking-tighter select-none' : ''}`}
@@ -202,6 +244,7 @@ const JwtDecoder: React.FC<JwtDecoderProps> = ({ initialData, onDataHandled }) =
                             setToken('');
                             setDecoded(null);
                             setKey('your-256-bit-secret');
+                            setKeyMode('pem');
                             setAudience('');
                             setIssuer('');
                             setVerification(null);

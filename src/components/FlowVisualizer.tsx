@@ -6,6 +6,7 @@ import { xmlService } from '../services/xmlService';
 import { DecoderData } from '../types';
 import { UsersIcon, ServerIcon, SendIcon, SettingsIcon, KeyIcon } from './icons';
 import type { DetectedFlow, RealFlowStep } from '../services/harFlowDetector';
+import { prettyPrintBody } from '../utils/prettyPrint';
 
 interface FlowVisualizerProps {
   onSendToDecoder: (data: DecoderData) => void;
@@ -224,18 +225,31 @@ const getDeviceSteps = (provider: ProviderConfig) => [
 // --- Real HAR flow adaptation -------------------------------------------------
 // Maps a DetectedFlow (from services/harFlowDetector.ts) onto the same step
 // shape the mock generators above produce, so the existing SVG/step UI can
-// render real data without any chrome changes. This chunk only wires
-// oauth-oidc flows (the only kind the detector currently reconstructs), so
-// the from/to pairing below is fixed to that 4-step shape. SAML wiring
-// (Chunk 4) will need to generalize this once SAML flows carry more steps.
-const REAL_OAUTH_STEP_NODE_PAIRS: { from: string; to: string }[] = [
-  { from: 'client', to: 'auth' }, // Redirect to IdP
-  { from: 'user', to: 'auth' },   // Authentication at IdP
-  { from: 'auth', to: 'client' }, // Callback to Pega (SP)
-  { from: 'client', to: 'auth' }, // Token Exchange (backchannel, usually uncaptured)
-];
+// render real data without any chrome changes. Each RealFlowStep already
+// carries its own nodeFrom/nodeTo (computed in the detector from which host
+// the underlying HAR entry actually hit), so no index-based guessing is
+// needed here — this just repackages that into the mock steps' shape.
+/** Segmented Pretty/Raw switch for the code display box below each step, styled for the dark panel it sits in. */
+const PrettyRawToggle: React.FC<{ pretty: boolean; onChange: (pretty: boolean) => void }> = ({ pretty, onChange }) => (
+  <div className="flex items-center bg-slate-800 rounded-full p-0.5 text-[9px] font-bold shrink-0" role="group" aria-label="Formatting">
+    <button
+      onClick={() => onChange(true)}
+      className={`px-2 py-0.5 rounded-full transition-colors ${pretty ? 'bg-slate-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}
+      title="Pretty-print JSON / form bodies"
+    >
+      Pretty
+    </button>
+    <button
+      onClick={() => onChange(false)}
+      className={`px-2 py-0.5 rounded-full transition-colors ${!pretty ? 'bg-slate-600 text-white' : 'text-slate-500 hover:text-slate-300'}`}
+      title="Show the exact original text"
+    >
+      Raw
+    </button>
+  </div>
+);
 
-const buildRealStepDetails = (step: RealFlowStep) => {
+const buildRealStepDetails = (step: RealFlowStep, pretty: boolean) => {
   if (!step.captured) {
     return {
       type: 'Not Captured',
@@ -247,7 +261,7 @@ const buildRealStepDetails = (step: RealFlowStep) => {
     lines.push(`${step.request.method} ${step.request.url}`);
     if (step.request.body) {
       lines.push('');
-      lines.push(step.request.body);
+      lines.push(pretty ? prettyPrintBody(step.request.body) : step.request.body);
     }
   }
   if (step.response) {
@@ -257,24 +271,23 @@ const buildRealStepDetails = (step: RealFlowStep) => {
   return { type: 'Real HAR Data', content: lines.join('\n') || 'No request/response body captured.' };
 };
 
-const stepsFromRealFlow = (flow: DetectedFlow) => flow.steps.map((step, i) => {
-  const pair = REAL_OAUTH_STEP_NODE_PAIRS[i] || { from: 'client', to: 'auth' };
-  return {
-    title: `${i + 1}. ${step.title}`,
-    description: step.description,
-    nodes: {
-      active: [pair.from, pair.to],
-      packet: { from: pair.from, to: pair.to, label: step.captured ? 'Real' : 'Inferred' },
-    },
-    details: buildRealStepDetails(step),
-    captured: step.captured,
-  };
-});
+const stepsFromRealFlow = (flow: DetectedFlow, pretty: boolean) => flow.steps.map((step, i) => ({
+  title: `${i + 1}. ${step.title}`,
+  description: step.description,
+  nodes: {
+    active: [step.nodeFrom, step.nodeTo],
+    packet: { from: step.nodeFrom, to: step.nodeTo, label: step.captured ? 'Real' : 'Inferred' },
+  },
+  details: buildRealStepDetails(step, pretty),
+  captured: step.captured,
+}));
 
 const FlowVisualizer: React.FC<FlowVisualizerProps> = ({ onSendToDecoder, initialFlowData, onFlowDataHandled }) => {
   const [flowType, setFlowType] = useState<'oauth' | 'saml' | 'device'>('oauth');
   const [providerId, setProviderId] = useState<string>('generic');
   const [currentStep, setCurrentStep] = useState(0);
+  const [showSummary, setShowSummary] = useState(false);
+  const [prettyPrint, setPrettyPrint] = useState(true);
   const [generatedData, setGeneratedData] = useState<string>('');
   const [realFlow, setRealFlow] = useState<DetectedFlow | null>(initialFlowData ?? null);
 
@@ -295,7 +308,7 @@ const FlowVisualizer: React.FC<FlowVisualizerProps> = ({ onSendToDecoder, initia
   // Loosely typed on purpose: mock steps and real-flow steps share the same
   // shape in practice (title/description/nodes/details) but real steps also
   // carry a `captured` flag mock steps don't have.
-  const steps: any[] = realFlow ? stepsFromRealFlow(realFlow) : mockSteps;
+  const steps: any[] = realFlow ? stepsFromRealFlow(realFlow, prettyPrint) : mockSteps;
 
   const realFlowToken = useMemo(() => {
     if (!realFlow) return null;
@@ -465,6 +478,13 @@ const FlowVisualizer: React.FC<FlowVisualizerProps> = ({ onSendToDecoder, initia
                 <div className="bg-white/80 backdrop-blur rounded-full px-3 py-1 text-xs font-bold text-slate-500 border border-slate-200">
                     Step {currentStep + 1} of {steps.length}
                 </div>
+                <button
+                    onClick={() => setShowSummary(s => !s)}
+                    className={`rounded-full px-3 py-1 text-xs font-bold border transition-colors backdrop-blur ${showSummary ? 'bg-sky-600 text-white border-sky-600' : 'bg-white/80 text-sky-600 border-sky-200 hover:bg-sky-50'}`}
+                    title="Show a clickable summary of every step in this flow"
+                >
+                    {showSummary ? 'Hide Full Flow' : 'View Full Flow'}
+                </button>
                 <div className={`bg-white/80 backdrop-blur rounded-full px-3 py-1 text-xs font-bold border border-slate-200 ${realFlow ? 'text-emerald-600' : providerId === 'google' ? 'text-red-500' : providerId === 'microsoft' ? 'text-blue-500' : providerId === 'okta' ? 'text-indigo-500' : 'text-slate-500'}`}>
                     {realFlow ? `${realFlow.idpDisplayName} → Pega` : `${provider.name} Context`}
                 </div>
@@ -475,6 +495,36 @@ const FlowVisualizer: React.FC<FlowVisualizerProps> = ({ onSendToDecoder, initia
                 )}
             </div>
         </div>
+
+        {showSummary && (
+            <div className="border-b border-slate-200 bg-white p-4 max-h-64 overflow-y-auto">
+                <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
+                    All Steps ({steps.length}) — click any step to jump to it
+                </div>
+                <div className="space-y-1">
+                    {steps.map((s, i) => (
+                        <button
+                            key={i}
+                            onClick={() => { setCurrentStep(i); setShowSummary(false); }}
+                            title={s.description}
+                            className={`w-full text-left flex items-center gap-3 px-3 py-2 rounded-lg text-xs transition-colors border ${
+                                i === currentStep
+                                ? 'bg-sky-50 text-sky-700 font-bold border-sky-200'
+                                : 'hover:bg-slate-50 text-slate-600 border-transparent'
+                            }`}
+                        >
+                            <span className="w-6 shrink-0 text-slate-400 font-mono">{i + 1}</span>
+                            <span className="flex-1 truncate">{s.title}</span>
+                            {'captured' in s && s.captured === false && (
+                                <span className="text-[9px] px-1.5 py-0.5 bg-amber-100 text-amber-700 rounded font-bold uppercase shrink-0">
+                                    Inferred
+                                </span>
+                            )}
+                        </button>
+                    ))}
+                </div>
+            </div>
+        )}
 
         <div className="p-6 grid grid-cols-1 lg:grid-cols-3 gap-8">
             <div className="lg:col-span-2 space-y-4">
@@ -492,9 +542,12 @@ const FlowVisualizer: React.FC<FlowVisualizerProps> = ({ onSendToDecoder, initia
                 <p className="text-slate-600 leading-relaxed">{step.description}</p>
                 
                 {step.details && (
-                    <div className="mt-4 bg-slate-900 rounded-xl p-5 text-slate-300 font-mono text-xs overflow-x-auto border border-slate-700 shadow-2xl relative group">
-                        <div className="absolute top-4 right-4 text-slate-600 uppercase text-[10px] font-bold tracking-widest">{step.details.type}</div>
-                        <pre className="mt-2">{step.details.content}</pre>
+                    <div className="mt-4 bg-slate-900 rounded-xl p-5 text-slate-300 font-mono text-xs border border-slate-700 shadow-2xl relative group">
+                        <div className="flex items-center justify-between mb-2">
+                            <div className="text-slate-600 uppercase text-[10px] font-bold tracking-widest">{step.details.type}</div>
+                            {realFlow && <PrettyRawToggle pretty={prettyPrint} onChange={setPrettyPrint} />}
+                        </div>
+                        <pre className="whitespace-pre-wrap break-all leading-relaxed max-h-[420px] min-h-[160px] overflow-y-auto pr-2">{step.details.content}</pre>
                     </div>
                 )}
             </div>
@@ -514,11 +567,35 @@ const FlowVisualizer: React.FC<FlowVisualizerProps> = ({ onSendToDecoder, initia
 
                 {realFlow ? (
                     <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
-                        <h4 className="text-sm font-bold text-slate-900 mb-3">Source HAR Requests</h4>
-                        <div className="space-y-1 text-[11px] text-slate-500 font-mono">
-                            {realFlow.sourceEntryIds.length > 0
-                                ? realFlow.sourceEntryIds.map(id => <div key={id} className="truncate">{id}</div>)
-                                : <div className="italic">No matched entry IDs</div>}
+                        <h4 className="text-sm font-bold text-slate-900 mb-1">Source HAR Requests</h4>
+                        <p className="text-[10px] text-slate-400 font-medium mb-3">
+                            {realFlow.sourceEntries.length} of {realFlow.totalHarEntries} requests in this capture
+                        </p>
+                        <div className="space-y-1 max-h-[220px] overflow-y-auto pr-1">
+                            {realFlow.sourceEntries.length > 0
+                                ? realFlow.sourceEntries.map(ref => {
+                                    const statusColor = ref.status >= 500 ? 'text-rose-600' : ref.status >= 400 ? 'text-rose-500' : ref.status >= 300 ? 'text-amber-600' : 'text-emerald-600';
+                                    let displayPath = ref.url;
+                                    try {
+                                        const u = new URL(ref.url);
+                                        displayPath = (u.pathname.split('/').pop() || u.host) + u.search;
+                                    } catch {
+                                        // keep full url as fallback
+                                    }
+                                    return (
+                                        <div
+                                            key={ref.id}
+                                            className="flex items-center gap-2 text-[11px] font-mono py-1 px-1.5 rounded hover:bg-white transition-colors"
+                                            title={`#${ref.index} of ${realFlow.totalHarEntries} in capture\n${ref.method} ${ref.url}\nStatus: ${ref.status}\nCaptured: ${new Date(ref.startedAt).toLocaleTimeString()}`}
+                                        >
+                                            <span className="text-slate-400 shrink-0 w-8 text-right">#{ref.index}</span>
+                                            <span className="text-slate-500 font-bold shrink-0">{ref.method}</span>
+                                            <span className="text-slate-600 truncate flex-1">{displayPath}</span>
+                                            <span className={`font-bold shrink-0 ${statusColor}`}>{ref.status}</span>
+                                        </div>
+                                    );
+                                })
+                                : <div className="italic text-[11px] text-slate-400">No matched entry IDs</div>}
                         </div>
                         {realFlow.issuer && (
                             <div className="mt-3 pt-3 border-t border-slate-200 text-[11px] text-slate-600">

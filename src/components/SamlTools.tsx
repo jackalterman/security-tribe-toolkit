@@ -222,59 +222,6 @@ const SamlTools: React.FC = () => {
                     </h2>
                     <p className="text-slate-600">Inspect, decode, and generate SAML Assertions, Requests, and Metadata.</p>
                 </div>
-                {activeView === 'Inspector' && samlSummary && !samlSummary.error && (
-                    <div className="bg-slate-100 p-4 rounded-xl border border-slate-200 text-sm text-slate-700 max-w-md">
-                        <h3 className="font-bold text-slate-900 mb-3">SAML Summary</h3>
-                        <div className="grid grid-cols-1 gap-2 text-xs">
-                            <div className="flex justify-between">
-                                <span className="text-slate-500">Issuer</span>
-                                <span className="font-mono text-slate-800 break-all">{samlSummary.issuer || '—'}</span>
-                            </div>
-                            <div className="flex justify-between">
-                                <span className="text-slate-500">Subject</span>
-                                <span className="font-mono text-slate-800 break-all">{samlSummary.subject || '—'}</span>
-                            </div>
-                            <div className="flex justify-between">
-                                <span className="text-slate-500">Audience</span>
-                                <span className="font-mono text-slate-800 break-all">{samlSummary.audience || '—'}</span>
-                            </div>
-                            <div className="flex justify-between">
-                                <span className="text-slate-500">Destination</span>
-                                <span className="font-mono text-slate-800 break-all">{samlSummary.destination || '—'}</span>
-                            </div>
-                            <div className="flex justify-between">
-                                <span className="text-slate-500">Valid From</span>
-                                <span className="font-mono text-slate-800 break-all">{samlSummary.notBefore || '—'}</span>
-                            </div>
-                            <div className="flex justify-between">
-                                <span className="text-slate-500">Valid Until</span>
-                                <span className="font-mono text-slate-800 break-all">{samlSummary.notOnOrAfter || '—'}</span>
-                            </div>
-                        </div>
-                        {samlSummary.attributes && samlSummary.attributes.length > 0 && (
-                            <div className="mt-3 pt-3 border-t border-slate-200">
-                                <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-2">Attributes</h4>
-                                <div className="space-y-1.5">
-                                    {samlSummary.attributes.map((attr, idx) => (
-                                        <div key={idx} className="flex items-start justify-between gap-3 group">
-                                            <span className="text-slate-500 shrink-0">{attr.name}</span>
-                                            <div className="flex items-center gap-1.5 min-w-0">
-                                                <span className="font-mono text-slate-800 break-all text-right">{attr.value || '—'}</span>
-                                                <button
-                                                    onClick={() => copyAttrValue(attr.value, idx)}
-                                                    className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0 text-slate-400 hover:text-slate-700"
-                                                    title="Copy value"
-                                                >
-                                                    {copiedAttrIndex === idx ? <CheckIcon className="h-3 w-3 text-green-600" /> : <ClipboardIcon className="h-3 w-3" />}
-                                                </button>
-                                            </div>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                )}
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -320,6 +267,63 @@ const SamlTools: React.FC = () => {
                                         </button>
                                     </div>
                                 </div>
+
+                                {samlSummary && !samlSummary.error && (
+                                    <div className="bg-slate-100 p-4 rounded-xl border border-slate-200 text-sm text-slate-700 animate-fade-in">
+                                        <h3 className="font-bold text-slate-900 mb-3">SAML Summary</h3>
+                                        <div className="grid grid-cols-1 gap-2 text-xs">
+                                            <div className="flex justify-between gap-2">
+                                                <span className="text-slate-500 shrink-0">Issuer</span>
+                                                <span className="font-mono text-slate-800 break-all text-right">{samlSummary.issuer || '—'}</span>
+                                            </div>
+                                            <div className="flex justify-between gap-2">
+                                                <span className="text-slate-500 shrink-0">Subject</span>
+                                                <span className="font-mono text-slate-800 break-all text-right">{samlSummary.subject || '—'}</span>
+                                            </div>
+                                            <div className="flex justify-between gap-2">
+                                                <span className="text-slate-500 shrink-0">Audience</span>
+                                                <span className="font-mono text-slate-800 break-all text-right">{samlSummary.audience || '—'}</span>
+                                            </div>
+                                            <div className="flex justify-between gap-2">
+                                                <span className="text-slate-500 shrink-0">Destination</span>
+                                                <span className="font-mono text-slate-800 break-all text-right">{samlSummary.destination || '—'}</span>
+                                            </div>
+                                            <div className="flex justify-between gap-2">
+                                                <span className="text-slate-500 shrink-0">Valid From</span>
+                                                <span className="font-mono text-slate-800 break-all text-right">{samlSummary.notBefore || '—'}</span>
+                                            </div>
+                                            <div className="flex justify-between gap-2">
+                                                <span className="text-slate-500 shrink-0">Valid Until</span>
+                                                <span className="font-mono text-slate-800 break-all text-right">{samlSummary.notOnOrAfter || '—'}</span>
+                                            </div>
+                                        </div>
+                                        {samlSummary.attributes && samlSummary.attributes.length > 0 && (
+                                            <div className="mt-3 pt-3 border-t border-slate-200">
+                                                <h4 className="text-[10px] font-bold text-slate-500 uppercase mb-2">
+                                                    Attributes ({samlSummary.attributes.length})
+                                                </h4>
+                                                <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+                                                    {samlSummary.attributes.map((attr, idx) => (
+                                                        <div key={idx} className="group">
+                                                            <div className="flex items-start justify-between gap-2">
+                                                                <span className="text-slate-500 text-[10px] font-mono break-all leading-relaxed">{attr.name}</span>
+                                                                <button
+                                                                    onClick={() => copyAttrValue(attr.value, idx)}
+                                                                    className="opacity-0 group-hover:opacity-100 transition-opacity shrink-0 text-slate-400 hover:text-slate-700 mt-0.5"
+                                                                    title="Copy value"
+                                                                >
+                                                                    {copiedAttrIndex === idx ? <CheckIcon className="h-3 w-3 text-green-600" /> : <ClipboardIcon className="h-3 w-3" />}
+                                                                </button>
+                                                            </div>
+                                                            <div className="font-mono text-slate-800 break-all text-xs mt-0.5">{attr.value || '—'}</div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
                                 <div className="bg-sky-50 p-4 rounded-lg border border-sky-100 text-xs text-sky-800 space-y-2">
                                     <h4 className="font-bold flex items-center gap-1"><BookIcon className="h-3 w-3" /> Quick Tip</h4>
                                     <p>The inspector automatically detects Base64-encoded SAML (HTTP-POST binding), and Base64 + DEFLATE-compressed, URL-encoded SAML (HTTP-Redirect binding).</p>

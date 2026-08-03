@@ -175,6 +175,11 @@ export const jwtService = {
     return `${dataToSign}.${encodedSignature}`;
   },
 
+  // Used speculatively all over the app (HAR Analyzer scans every header and
+  // cookie value through this to auto-detect embedded JWTs), so failing to
+  // decode is an expected, routine outcome — not an application error — and
+  // shouldn't spam the console every time a non-JWT string has 3 dot-separated
+  // segments but isn't valid Base64url.
   decode(token: string): DecodedJwt | null {
     try {
       const parts = token.split('.');
@@ -191,10 +196,114 @@ export const jwtService = {
         signature,
         raw: { header: encodedHeader, payload: encodedPayload, token }
       };
-    } catch (error) {
-      console.error("Failed to decode token:", error);
+    } catch {
       return null;
     }
+  },
+
+  /** Shared claim checks (exp/nbf/aud/iss) used by both direct-key and JWKS-based verification. */
+  checkClaims(payload: JwtPayload, options?: { audience?: string; issuer?: string }): VerificationResult {
+    const now = Math.floor(Date.now() / 1000);
+    const tolerance = 2;
+
+    if (payload.exp && now > (payload.exp + tolerance)) {
+      return { isValid: false, reason: `Token expired at ${new Date(payload.exp * 1000).toLocaleString()}.` };
+    }
+
+    if (payload.nbf && now < (payload.nbf - tolerance)) {
+      return { isValid: false, reason: `Token is not valid before ${new Date(payload.nbf * 1000).toLocaleString()}.` };
+    }
+
+    if (options?.audience && payload.aud && payload.aud !== options.audience) {
+      return { isValid: false, reason: `Invalid audience. Expected "${options.audience}", but got "${payload.aud}".` };
+    }
+
+    if (options?.issuer && payload.iss && payload.iss !== options.issuer) {
+      return { isValid: false, reason: `Invalid issuer. Expected "${options.issuer}", but got "${payload.iss}".` };
+    }
+
+    return { isValid: true, reason: 'Token signature and claims are valid.' };
+  },
+
+  /**
+   * Verifies a token against a JWKS endpoint instead of a pasted key. Fetches
+   * the JWKS URL directly (this expects the URL to already point at the JWKS
+   * document itself, e.g. .../.well-known/jwks.json — not an OIDC issuer URL;
+   * use fetchJwks() separately if you only have the issuer).
+   * Selects candidate keys by matching `kid` when the token has one, otherwise
+   * falls back to keys whose declared `alg` matches (or all keys, as a last
+   * resort), and tries each until one produces a valid signature.
+   */
+  async verifyWithJwks(token: string, jwksUrl: string, options?: { audience?: string; issuer?: string }): Promise<VerificationResult> {
+    const decoded = this.decode(token);
+    if (!decoded) {
+      return { isValid: false, reason: 'Token is malformed or could not be decoded.' };
+    }
+
+    const { header, raw } = decoded;
+    if (header.alg !== 'RS256' && header.alg !== 'ES256') {
+      return { isValid: false, reason: `JWKS verification only supports RS256/ES256 tokens; this token uses "${header.alg}".` };
+    }
+
+    let jwks: any;
+    try {
+      const res = await fetch(jwksUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      jwks = await res.json();
+    } catch (e: any) {
+      return { isValid: false, reason: `Failed to fetch JWKS from URL: ${e.message}` };
+    }
+
+    const keys: any[] = Array.isArray(jwks?.keys) ? jwks.keys : [];
+    if (keys.length === 0) {
+      return { isValid: false, reason: 'JWKS response contained no keys.' };
+    }
+
+    const candidates = header.kid
+      ? keys.filter(k => k.kid === header.kid)
+      : keys.filter(k => !k.alg || k.alg === header.alg);
+    const tryKeys = candidates.length > 0 ? candidates : keys;
+
+    const dataToSign = `${raw.header}.${raw.payload}`;
+    const sigStr = decoded.signature.replace(/-/g, '+').replace(/_/g, '/');
+    const pad = sigStr.length % 4;
+    const paddedSig = pad ? sigStr + '='.repeat(4 - pad) : sigStr;
+    const signatureBytes = new Uint8Array(atob(paddedSig).split('').map(c => c.charCodeAt(0)));
+
+    let importedAnyKey = false;
+    for (const jwk of tryKeys) {
+      try {
+        const cryptoKey = header.alg === 'RS256'
+          ? await crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'])
+          : await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: jwk.crv || 'P-256' }, false, ['verify']);
+        importedAnyKey = true;
+
+        const isValidSignature = header.alg === 'RS256'
+          ? await crypto.subtle.verify('RSASSA-PKCS1-v1_5', cryptoKey, signatureBytes, new TextEncoder().encode(dataToSign))
+          : await crypto.subtle.verify({ name: 'ECDSA', hash: { name: 'SHA-256' } }, cryptoKey, signatureBytes, new TextEncoder().encode(dataToSign));
+
+        if (isValidSignature) {
+          const claimsResult = this.checkClaims(decoded.payload, options);
+          if (!claimsResult.isValid) return claimsResult;
+          return {
+            isValid: true,
+            reason: `Token signature verified against JWKS key${jwk.kid ? ` (kid: ${jwk.kid})` : ''}.`,
+          };
+        }
+      } catch {
+        // This key didn't import or verify cleanly — try the next candidate.
+      }
+    }
+
+    if (!importedAnyKey) {
+      return {
+        isValid: false,
+        reason: header.kid
+          ? `No key with kid "${header.kid}" found in JWKS (${keys.length} key${keys.length === 1 ? '' : 's'} checked).`
+          : 'No usable key found in JWKS for this algorithm.',
+      };
+    }
+    return { isValid: false, reason: `Signature did not match any of the ${tryKeys.length} candidate key(s) in the JWKS.` };
   },
 
   async verify(token: string, key: string, options?: { audience?: string; issuer?: string }): Promise<VerificationResult> {
@@ -209,6 +318,22 @@ export const jwtService = {
         return { isValid: false, reason: 'Algorithm "none" is not accepted for security reasons.' };
     }
 
+    // A pasted "key" that's actually a URL means the person wants JWKS-based
+    // verification (fetch the IdP's published keys and match by kid) instead
+    // of pasting a raw PEM public key.
+    if ((header.alg === 'RS256' || header.alg === 'ES256') && /^https?:\/\//i.test(key.trim())) {
+      return this.verifyWithJwks(token, key.trim(), options);
+    }
+
+    if (!key || !key.trim()) {
+      return {
+        isValid: false,
+        reason: header.alg === 'HS256'
+          ? 'Enter the HMAC secret to verify against.'
+          : 'Paste a public key (PEM) or switch to a JWKS URL to verify against.',
+      };
+    }
+
     const dataToSign = `${raw.header}.${raw.payload}`;
     
     const sigStr = decoded.signature.replace(/-/g, '+').replace(/_/g, '/');
@@ -221,14 +346,26 @@ export const jwtService = {
       if (header.alg === 'HS256') {
           const cryptoKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(key), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
           isValidSignature = await crypto.subtle.verify('HMAC', cryptoKey, signatureBytes, new TextEncoder().encode(dataToSign));
-      } else if (header.alg === 'RS256') {
-          const publicKeyBuffer = importPem(key, 'public');
-          const cryptoKey = await crypto.subtle.importKey('spki', publicKeyBuffer, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
-          isValidSignature = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', cryptoKey, signatureBytes, new TextEncoder().encode(dataToSign));
-      } else if (header.alg === 'ES256') {
-          const publicKeyBuffer = importPem(key, 'public');
-          const cryptoKey = await crypto.subtle.importKey('spki', publicKeyBuffer, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
-          isValidSignature = await crypto.subtle.verify({ name: 'ECDSA', hash: { name: 'SHA-256' } }, cryptoKey, signatureBytes, new TextEncoder().encode(dataToSign));
+      } else if (header.alg === 'RS256' || header.alg === 'ES256') {
+          let publicKeyBuffer: ArrayBuffer;
+          try {
+              publicKeyBuffer = importPem(key, 'public');
+          } catch (pemError: any) {
+              return { isValid: false, reason: `Malformed PEM key: ${pemError.message || 'could not decode the Base64 body.'}` };
+          }
+          try {
+              const cryptoKey = header.alg === 'RS256'
+                  ? await crypto.subtle.importKey('spki', publicKeyBuffer, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'])
+                  : await crypto.subtle.importKey('spki', publicKeyBuffer, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+              isValidSignature = header.alg === 'RS256'
+                  ? await crypto.subtle.verify('RSASSA-PKCS1-v1_5', cryptoKey, signatureBytes, new TextEncoder().encode(dataToSign))
+                  : await crypto.subtle.verify({ name: 'ECDSA', hash: { name: 'SHA-256' } }, cryptoKey, signatureBytes, new TextEncoder().encode(dataToSign));
+          } catch (importError: any) {
+              return {
+                  isValid: false,
+                  reason: `Couldn't import that key as a ${header.alg} public key (${importError.name || 'DataError'}). Make sure it's the full PEM block, in SPKI/"PUBLIC KEY" form, and matches the token's algorithm.`,
+              };
+          }
       } else {
         return { isValid: false, reason: `Unsupported algorithm "${header.alg}" for verification.` };
       }
@@ -237,29 +374,10 @@ export const jwtService = {
         return { isValid: false, reason: 'Signature is invalid.' };
       }
 
-      const now = Math.floor(Date.now() / 1000);
-      const tolerance = 2;
-
-      if (payload.exp && now > (payload.exp + tolerance)) {
-        return { isValid: false, reason: `Token expired at ${new Date(payload.exp * 1000).toLocaleString()}.` };
-      }
-
-      if (payload.nbf && now < (payload.nbf - tolerance)) {
-        return { isValid: false, reason: `Token is not valid before ${new Date(payload.nbf * 1000).toLocaleString()}.` };
-      }
-      
-      if (options?.audience && payload.aud && payload.aud !== options.audience) {
-        return { isValid: false, reason: `Invalid audience. Expected "${options.audience}", but got "${payload.aud}".` };
-      }
-
-      if (options?.issuer && payload.iss && payload.iss !== options.issuer) {
-        return { isValid: false, reason: `Invalid issuer. Expected "${options.issuer}", but got "${payload.iss}".` };
-      }
-
-      return { isValid: true, reason: 'Token signature and claims are valid.' };
+      return this.checkClaims(payload, options);
     } catch (error: any) {
       console.error('Verification error:', error);
-      return { isValid: false, reason: `Verification failed: ${error.message}` };
+      return { isValid: false, reason: `Verification failed: ${error.message || error.name || 'Unknown error'}` };
     }
   },
 

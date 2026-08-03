@@ -21,9 +21,44 @@ import { HarRoot, HarEntry, filterEntries, parseHarFile } from '../services/har'
 import { saveHarToDB, getHarFromDB, clearHarFromDB, getHarMetadataFromDB, deleteHarFromDB, HarMetadata } from '../services/harStorage';
 import { jwtService } from '../services/jwtService';
 import { detectFlows, hasUnreconstructedSamlTraffic, DetectedFlow } from '../services/harFlowDetector';
+import { prettyPrintBody } from '../utils/prettyPrint';
 import JsonViewer from './JsonViewer';
 
 const PEGA_COOKIES = ['Pega-AAT', 'Pega-Perf', 'Pega-RULES', 'Pega-ThreadName', 'Pega-UI-SessId'];
+
+/** Small chevron shown next to the active sort column, pointing in the active direction. Renders nothing for inactive columns. */
+const SortIndicator: React.FC<{
+  field: string;
+  sortField: string;
+  sortDirection: 'asc' | 'desc';
+}> = ({ field, sortField, sortDirection }) => {
+  if (sortField !== field) return null;
+  return sortDirection === 'asc'
+    ? <ChevronUpIcon className="inline h-3 w-3 ml-0.5 text-sky-600" />
+    : <ChevronDownIcon className="inline h-3 w-3 ml-0.5 text-sky-600" />;
+};
+
+/** Segmented Pretty/Raw switch used everywhere a body is shown, so bodies can be
+ * flipped back to their exact original text (e.g. to check literal whitespace,
+ * or when prettyPrintBody's best-effort formatting guesses wrong). */
+const PrettyRawToggle: React.FC<{ pretty: boolean; onChange: (pretty: boolean) => void }> = ({ pretty, onChange }) => (
+  <div className="flex items-center bg-slate-100 rounded-full p-0.5 text-[9px] font-bold shrink-0" role="group" aria-label="Formatting">
+    <button
+      onClick={() => onChange(true)}
+      className={`px-2 py-0.5 rounded-full transition-colors ${pretty ? 'bg-white text-sky-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+      title="Pretty-print JSON / form bodies"
+    >
+      Pretty
+    </button>
+    <button
+      onClick={() => onChange(false)}
+      className={`px-2 py-0.5 rounded-full transition-colors ${!pretty ? 'bg-white text-sky-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+      title="Show the exact original text"
+    >
+      Raw
+    </button>
+  </div>
+);
 
 interface HarAnalyzerProps {
   onSendToDecoder?: (data: any) => void;
@@ -68,8 +103,31 @@ const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder, onViewFlow }
   const [activeStatuses, setActiveStatuses] = usePersistentState<string[]>('har-active-statuses', []);
   const [sortField, setSortField] = useState<keyof HarEntry | 'name' | 'size'>('startedDateTime');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+
+  // Clicking a header toggles direction if it's already the active column,
+  // otherwise switches to that column (ascending). This replaces the old
+  // "always just changes the field" behavior, which had no way to tell what
+  // was active or to get back to chronological order.
+  const handleSort = (field: keyof HarEntry | 'name' | 'size') => {
+    setSortField(prevField => {
+      if (prevField === field) {
+        setSortDirection(prevDir => (prevDir === 'asc' ? 'desc' : 'asc'));
+        return prevField;
+      }
+      setSortDirection('asc');
+      return field;
+    });
+  };
+
+  const isDefaultSort = sortField === 'startedDateTime' && sortDirection === 'asc';
+  const resetSort = () => {
+    setSortField('startedDateTime');
+    setSortDirection('asc');
+  };
   const [activeTab, setActiveTab] = useState<'headers' | 'payload' | 'response' | 'cookies'>('headers');
   const [prettyPrintContent, setPrettyPrintContent] = useState<{ title: string, body: string } | null>(null);
+  const [prettyPrint, setPrettyPrint] = usePersistentState<boolean>('har-pretty-print', true);
+  const [modalPrettyPrint, setModalPrettyPrint] = usePersistentState<boolean>('har-modal-pretty-print', true);
   const [expandedCookieIndex, setExpandedCookieIndex] = useState<number | null>(null);
   const [expandedHeaderIndex, setExpandedHeaderIndex] = useState<number | null>(null);
   
@@ -185,6 +243,20 @@ const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder, onViewFlow }
     });
   }, [harData, searchQuery, activeTypes, activeStatuses, sortField, sortDirection]);
 
+  // Fixed chronological (capture-order) index per entry, independent of the
+  // current sort column. Used for the "#" column so the user always has a
+  // stable reference back to the original waterfall order, no matter what
+  // the table is currently sorted by.
+  const orderIndexMap = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!harData) return map;
+    const chronological = [...harData.log.entries].sort(
+      (a, b) => new Date(a.startedDateTime).getTime() - new Date(b.startedDateTime).getTime()
+    );
+    chronological.forEach((e, i) => map.set(e._id, i + 1));
+    return map;
+  }, [harData]);
+
   const stats = useMemo(() => {
     if (!harData) return null;
     const entries = harData.log.entries;
@@ -200,18 +272,30 @@ const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder, onViewFlow }
   }, [harData]);
 
   // HAR-to-Flow Reconstruction (see enhancement-har-flow-reconstruction.md).
-  // Chunk 2: detection banner wiring. Only OAuth2/OIDC flows are fully
-  // reconstructed today (Chunk 1 scope) — SAML traffic is flagged separately
-  // so we can tell the user it was seen but isn't reconstructable yet.
-  const detectedFlows = useMemo(() => {
-    if (!harData) return [];
-    return detectFlows(harData);
+  // detectFlows() is async (SAML decoding may need DecompressionStream), so
+  // this is state-driven rather than a useMemo.
+  const [detectedFlows, setDetectedFlows] = useState<DetectedFlow[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!harData) {
+      setDetectedFlows([]);
+      return;
+    }
+    detectFlows(harData).then(flows => {
+      if (!cancelled) setDetectedFlows(flows);
+    });
+    return () => { cancelled = true; };
   }, [harData]);
 
   const hasUnreconstructedSaml = useMemo(() => {
     if (!harData) return false;
-    return hasUnreconstructedSamlTraffic(harData);
-  }, [harData]);
+    if (!hasUnreconstructedSamlTraffic(harData)) return false;
+    // Only show the "not fully reconstructed" note if SAML traffic exists
+    // but didn't actually produce a SAML DetectedFlow (e.g. parse failure,
+    // or the ACS POST landed on a host we didn't recognize as Pega).
+    return !detectedFlows.some(f => f.kind === 'saml');
+  }, [harData, detectedFlows]);
 
   const handleCopy = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
@@ -246,7 +330,10 @@ const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder, onViewFlow }
       const u = new URL(url);
       const pathname = u.pathname;
       const parts = pathname.split('/');
-      return parts[parts.length - 1] || u.host;
+      const file = parts[parts.length - 1] || u.host;
+      // Include the query string so params (e.g. state/code/RelayState) are
+      // visible instead of being silently dropped before they reach the DOM.
+      return file + u.search;
     } catch {
       return url.split('/').pop() || url;
     }
@@ -302,7 +389,7 @@ const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder, onViewFlow }
                     )}
                     {hasUnreconstructedSaml && (
                         <p className="text-[11px] text-indigo-700 italic">
-                            SAML traffic was also detected in this HAR, but full step-by-step reconstruction for SAML isn't available yet — coming in a future update.
+                            SAML traffic was also detected in this HAR, but it couldn't be fully correlated into a step-by-step flow (e.g. the response landed on an unrecognized host, or the payload failed to parse).
                         </p>
                     )}
                 </div>
@@ -365,6 +452,18 @@ const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder, onViewFlow }
                                     </button>
                                 )}
                             </div>
+                            <button
+                                onClick={resetSort}
+                                disabled={isDefaultSort}
+                                className={`p-2 rounded-xl transition-all border shadow-sm ${
+                                    isDefaultSort
+                                    ? 'text-slate-300 border-slate-200 bg-white cursor-default'
+                                    : 'text-sky-600 border-sky-200 bg-sky-50 hover:bg-sky-100'
+                                }`}
+                                title="Restore chronological (capture) order"
+                            >
+                                <RefreshIcon className="h-5 w-5" />
+                            </button>
                             <label className="p-2 text-slate-400 hover:text-sky-600 hover:bg-sky-50 rounded-xl transition-all border border-slate-200 bg-white shadow-sm cursor-pointer" title="Upload New HAR">
                                 <UploadIcon className="h-5 w-5" />
                                 <input type="file" accept=".har,.json" className="hidden" onChange={handleFileUpload} />
@@ -399,10 +498,25 @@ const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder, onViewFlow }
                         <table className="w-full text-left text-xs border-collapse">
                             <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 z-10">
                                 <tr>
-                                    <th className="px-3 py-2 font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100" onClick={() => setSortField('name')}>Name</th>
-                                    <th className="px-3 py-2 font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100" onClick={() => setSortField('response')}>Status</th>
-                                    <th className="px-3 py-2 font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100" onClick={() => setSortField('time')}>Time</th>
-                                    <th className="px-3 py-2 font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100" onClick={() => setSortField('size')}>Size</th>
+                                    <th
+                                        className="px-3 py-2 font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100 select-none w-10"
+                                        onClick={() => handleSort('startedDateTime')}
+                                        title="Sort by chronological capture order"
+                                    >
+                                        # <SortIndicator field="startedDateTime" sortField={sortField} sortDirection={sortDirection} />
+                                    </th>
+                                    <th className="px-3 py-2 font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100 select-none" onClick={() => handleSort('name')}>
+                                        Name <SortIndicator field="name" sortField={sortField} sortDirection={sortDirection} />
+                                    </th>
+                                    <th className="px-3 py-2 font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100 select-none" onClick={() => handleSort('response')}>
+                                        Status <SortIndicator field="response" sortField={sortField} sortDirection={sortDirection} />
+                                    </th>
+                                    <th className="px-3 py-2 font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100 select-none" onClick={() => handleSort('time')}>
+                                        Time <SortIndicator field="time" sortField={sortField} sortDirection={sortDirection} />
+                                    </th>
+                                    <th className="px-3 py-2 font-bold text-slate-500 uppercase tracking-wider cursor-pointer hover:bg-slate-100 select-none" onClick={() => handleSort('size')}>
+                                        Size <SortIndicator field="size" sortField={sortField} sortDirection={sortDirection} />
+                                    </th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -414,6 +528,9 @@ const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder, onViewFlow }
                                             selectedEntry?._id === entry._id ? 'bg-sky-50 outline outline-1 outline-sky-200 z-[1]' : ''
                                         } ${entry.analysis?.hasErrors ? 'bg-rose-50/30' : ''}`}
                                     >
+                                        <td className="px-3 py-2 font-mono text-slate-400 w-10">
+                                            {orderIndexMap.get(entry._id) ?? '–'}
+                                        </td>
                                         <td className="px-3 py-2 max-w-[200px]">
                                             <div className="flex items-center space-x-2">
                                                 {entry.analysis?.authType && (
@@ -566,15 +683,18 @@ const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder, onViewFlow }
                                         <section>
                                             <div className="flex items-center justify-between mb-2">
                                                 <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Request Body ({selectedEntry.request.postData.mimeType})</h4>
-                                                <button 
-                                                    onClick={() => setPrettyPrintContent({ title: 'Request Body', body: selectedEntry.request.postData?.text || '' })}
-                                                    className="px-2 py-0.5 bg-slate-100 text-slate-600 hover:bg-sky-100 hover:text-sky-700 rounded text-[9px] font-bold transition-colors"
-                                                >
-                                                    View Pretty
-                                                </button>
+                                                <div className="flex items-center gap-2">
+                                                    <PrettyRawToggle pretty={prettyPrint} onChange={setPrettyPrint} />
+                                                    <button 
+                                                        onClick={() => setPrettyPrintContent({ title: 'Request Body', body: selectedEntry.request.postData?.text || '' })}
+                                                        className="px-2 py-0.5 bg-slate-100 text-slate-600 hover:bg-sky-100 hover:text-sky-700 rounded text-[9px] font-bold transition-colors"
+                                                    >
+                                                        Open in Modal
+                                                    </button>
+                                                </div>
                                             </div>
-                                            <div className="bg-slate-900 rounded-lg p-3 text-[11px] font-mono text-emerald-400 whitespace-pre-wrap break-all max-h-[60vh] overflow-y-auto border border-slate-800">
-                                                {selectedEntry.request.postData.text}
+                                            <div className="bg-slate-900 rounded-lg p-3 text-[11px] font-mono text-emerald-400 whitespace-pre-wrap break-all leading-relaxed max-h-[65vh] min-h-[160px] overflow-y-auto border border-slate-800">
+                                                {prettyPrint ? prettyPrintBody(selectedEntry.request.postData.text) : selectedEntry.request.postData.text}
                                             </div>
                                         </section>
                                     ) : (
@@ -606,15 +726,18 @@ const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder, onViewFlow }
                                                     <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Response Body</h4>
                                                     <span className="text-[9px] text-slate-400 font-mono italic">({selectedEntry.response.content.mimeType})</span>
                                                 </div>
-                                                <button 
-                                                    onClick={() => setPrettyPrintContent({ title: 'Response Body', body: selectedEntry.response.content.text || '' })}
-                                                    className="px-2 py-0.5 bg-slate-100 text-slate-600 hover:bg-sky-100 hover:text-sky-700 rounded text-[9px] font-bold transition-colors"
-                                                >
-                                                    View Pretty
-                                                </button>
+                                                <div className="flex items-center gap-2">
+                                                    <PrettyRawToggle pretty={prettyPrint} onChange={setPrettyPrint} />
+                                                    <button 
+                                                        onClick={() => setPrettyPrintContent({ title: 'Response Body', body: selectedEntry.response.content.text || '' })}
+                                                        className="px-2 py-0.5 bg-slate-100 text-slate-600 hover:bg-sky-100 hover:text-sky-700 rounded text-[9px] font-bold transition-colors"
+                                                    >
+                                                        Open in Modal
+                                                    </button>
+                                                </div>
                                             </div>
-                                            <div className="bg-slate-900 rounded-lg p-3 text-[11px] font-mono text-sky-400 whitespace-pre-wrap break-all max-h-[60vh] overflow-y-auto border border-slate-800">
-                                                {selectedEntry.response.content.text}
+                                            <div className="bg-slate-900 rounded-lg p-3 text-[11px] font-mono text-sky-400 whitespace-pre-wrap break-all leading-relaxed max-h-[65vh] min-h-[160px] overflow-y-auto border border-slate-800">
+                                                {prettyPrint ? prettyPrintBody(selectedEntry.response.content.text) : selectedEntry.response.content.text}
                                             </div>
                                         </section>
                                     ) : (
@@ -726,6 +849,7 @@ const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder, onViewFlow }
                             <h3 className="text-xs font-black text-slate-800 uppercase tracking-[0.2em]">{prettyPrintContent.title}</h3>
                         </div>
                         <div className="flex items-center space-x-2">
+                            <PrettyRawToggle pretty={modalPrettyPrint} onChange={setModalPrettyPrint} />
                             <button 
                                 onClick={() => handleCopy(prettyPrintContent.body, 'modal')}
                                 className="flex items-center space-x-2 px-3 py-1.5 text-[11px] font-bold text-slate-500 hover:text-sky-600 hover:bg-sky-50 rounded-full transition-all border border-slate-100 hover:border-sky-200"
@@ -745,14 +869,7 @@ const HarAnalyzer: React.FC<HarAnalyzerProps> = ({ onSendToDecoder, onViewFlow }
                   <div className="flex-1 overflow-auto bg-slate-950 selection:bg-sky-500/30">
                       <div className="p-8">
                           <pre className="text-[13px] font-mono text-sky-400/90 leading-relaxed whitespace-pre-wrap break-words [tab-size:4]">
-                              {(() => {
-                                  try {
-                                      const parsed = JSON.parse(prettyPrintContent.body);
-                                      return JSON.stringify(parsed, null, 4);
-                                  } catch {
-                                      return prettyPrintContent.body;
-                                  }
-                              })()}
+                              {modalPrettyPrint ? prettyPrintBody(prettyPrintContent.body) : prettyPrintContent.body}
                           </pre>
                       </div>
                   </div>
